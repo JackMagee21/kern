@@ -15,6 +15,8 @@
 #include "exceptions.h"
 #include "panic.h"
 #include "scheduler.h"
+#include "serial.h"
+#include "syscall.h"
 
 /* Defined by the linker script — first byte after the kernel image. */
 extern uint32_t _kernel_end;
@@ -24,6 +26,7 @@ extern uint32_t _kernel_end;
 
 void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     terminal_init();
+    serial_init();  /* mirror all terminal output to COM1 */
 
     gdt_init();
     terminal_print("[OK] GDT loaded  (ring-0, ring-3, TSS)\n");
@@ -73,6 +76,10 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     /* Cooperative task scheduler (wraps the boot context as PID 0). */
     scheduler_init();
     terminal_print("[OK] Scheduler ready\n");
+
+    /* int 0x80 syscall gate (SYS_EXIT=0, SYS_WRITE=1). */
+    syscall_init();
+    terminal_print("[OK] Syscalls ready  (int 0x80)\n");
 
     shell_run(); /* does not return */
 }

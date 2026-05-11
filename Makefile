@@ -37,12 +37,18 @@ $(ISO): $(KERNEL) grub.cfg
 	grub-mkrescue -o $(ISO) $(ISO_DIR)
 
 run: $(ISO)
-	qemu-system-i386 -cdrom $(ISO)
+	qemu-system-i386 -cdrom $(ISO) -serial stdio
 
 run-headless: $(ISO)
 	qemu-system-i386 -cdrom $(ISO) -nographic -serial stdio
 
-clean:
-	rm -rf $(BUILD) $(KERNEL) $(ISO) $(ISO_DIR)/
+# run-debug: no GUI, serial on stdio, log interrupts + CPU resets to stderr,
+# and don't reboot on triple fault so you can read the last output.
+run-debug: $(ISO)
+	qemu-system-i386 -cdrom $(ISO) -nographic -serial stdio \
+	    -d int,cpu_reset -no-reboot -no-shutdown 2>qemu-debug.log
 
-.PHONY: all run run-headless clean
+clean:
+	rm -rf $(BUILD) $(KERNEL) $(ISO) $(ISO_DIR)/ qemu-debug.log
+
+.PHONY: all run run-headless run-debug clean

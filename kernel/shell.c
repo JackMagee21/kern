@@ -7,6 +7,8 @@
 #include "heap.h"
 #include "task.h"
 #include "scheduler.h"
+#include "usermode.h"
+#include "syscall.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -76,6 +78,7 @@ static void cmd_help(const char *args) {
     terminal_print("  meminfo           physical memory and heap statistics\n");
     terminal_print("  ps                list all tasks\n");
     terminal_print("  sleep <ms>        sleep for <ms> milliseconds\n");
+    terminal_print("  usertest          spawn a ring-3 task via int 0x80\n");
     terminal_print("  version           kernel version summary\n");
     terminal_print("  halt              stop the CPU\n");
 }
@@ -134,14 +137,42 @@ static void cmd_version(const char *args) {
     terminal_print("Kern 2.0 -- x86 hobby kernel\n");
     terminal_print("  CPU:       GDT (ring-0/3), IDT, PIC, exceptions, TSS\n");
     terminal_print("  Memory:    PMM bitmap, 4 KB paging, heap (kmalloc/kfree)\n");
-    terminal_print("  Devices:   VGA 80x25, PS/2 keyboard, PIT 1 kHz\n");
+    terminal_print("  Devices:   VGA 80x25, PS/2 keyboard, PIT 1 kHz, serial COM1\n");
     terminal_print("  Process:   cooperative scheduler, task_yield/sleep\n");
+    terminal_print("  User mode: ring-3 via iret, int 0x80 syscalls (exit, write)\n");
 }
 
 static void cmd_halt(const char *args) {
     (void)args;
     terminal_print("Halting.\n");
     __asm__ volatile ("cli; hlt");
+}
+
+/* ── User-mode test ────────────────────────────────────────────────────── */
+
+static const char user_msg[] = "Hello from ring-3!\n";
+static uint8_t    ustack[4096] __attribute__((aligned(16)));
+
+/* Runs in ring-3: prints a message via SYS_WRITE then exits via SYS_EXIT. */
+static void user_hello(void) {
+    __asm__ volatile (
+        "mov $1, %%eax\n"   /* SYS_WRITE */
+        "int $0x80\n"
+        :: "b"(user_msg) : "eax"
+    );
+    __asm__ volatile ("mov $0, %%eax; int $0x80" ::: "eax");
+    for (;;) __asm__ volatile ("hlt");
+}
+
+/* Kernel-task trampoline: sets up and enters ring-3. */
+static void usertest_task(void) {
+    enter_usermode(user_hello, (uint32_t)(ustack + sizeof(ustack)));
+}
+
+static void cmd_usertest(const char *args) {
+    (void)args;
+    task_create("usertest", usertest_task);
+    terminal_print("User task spawned — it will print from ring-3 then exit.\n");
 }
 
 /* ── Command table ─────────────────────────────────────────────────────── */
@@ -156,6 +187,7 @@ static const command_t commands[] = {
     { "meminfo", cmd_meminfo },
     { "ps",      cmd_ps      },
     { "sleep",   cmd_sleep   },
+    { "usertest", cmd_usertest },
     { "version", cmd_version },
     { "halt",    cmd_halt    },
 };

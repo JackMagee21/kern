@@ -33,4 +33,9 @@ void terminal_putchar(char c);
 void terminal_print(const char *str);
 void terminal_set_color(vga_color fg, vga_color bg);
 
+/* Optional hook called for every character sent to the terminal.
+ * Used by the serial driver to mirror all output to COM1. */
+typedef void (*terminal_hook_t)(char c);
+void terminal_set_output_hook(terminal_hook_t hook);
+
 #endif

@@ -1,9 +1,12 @@
 #include "vga.h"
 
-static size_t    terminal_row;
-static size_t    terminal_col;
-static uint8_t   terminal_color;
-static uint16_t *terminal_buffer;
+static size_t         terminal_row;
+static size_t         terminal_col;
+static uint8_t        terminal_color;
+static uint16_t      *terminal_buffer;
+static terminal_hook_t output_hook = NULL;
+
+void terminal_set_output_hook(terminal_hook_t hook) { output_hook = hook; }
 
 static inline uint8_t vga_make_color(vga_color fg, vga_color bg) {
     return fg | (bg << 4);
@@ -48,6 +51,8 @@ void terminal_clear(void) {
 }
 
 void terminal_putchar(char c) {
+    if (output_hook) output_hook(c);
+
     if (c == '\n') {
         terminal_col = 0;
         if (++terminal_row == VGA_HEIGHT)

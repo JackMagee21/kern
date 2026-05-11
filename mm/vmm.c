@@ -12,8 +12,8 @@
 static uint32_t page_dir[1024]     __attribute__((aligned(4096)));
 static uint32_t pt_low[2][1024]    __attribute__((aligned(4096)));
 
-#define PDE_KERNEL (VMM_PRESENT | VMM_WRITABLE)
-#define PTE_KERNEL (VMM_PRESENT | VMM_WRITABLE)
+#define PDE_KERNEL (VMM_PRESENT | VMM_WRITABLE | VMM_USER)
+#define PTE_KERNEL (VMM_PRESENT | VMM_WRITABLE | VMM_USER)
 
 /* Given a present PDE value, return a pointer to its page table.
  * Works because we are identity-mapped: physical == virtual. */

@@ -61,7 +61,7 @@ void scheduler_print_tasks(void) {
 
     task_t *t = head;
     do {
-        kprintf("  %3u  %s  %s\n", t->pid, state_name(t->state), t->name);
+        kprintf("  %u\t%s  %s\n", t->pid, state_name(t->state), t->name);
         t = t->next;
     } while (t != head);
 }

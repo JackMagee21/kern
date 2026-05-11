@@ -8,11 +8,14 @@ x86 (i686), 32-bit protected mode, GRUB Multiboot, no stdlib, cross-compiled wit
 boot/      entry point (_start), 16 KB stack, passes eax/ebx to kernel_main
 cpu/       GDT (6 entries), IDT (256 gates), ISR/IRQ stubs, PIC, io.h,
            TSS, exception handlers, context_switch.s
-drivers/   VGA (80×25, terminal_set_color), PS/2 keyboard, PIT 1 kHz (tick callback)
+drivers/   VGA (80×25, terminal_set_color), PS/2 keyboard, PIT 1 kHz (tick callback),
+           serial COM1 (115200 8N1, mirrors all terminal_putchar output)
 kernel/    kernel_main, kprintf, shell, kpanic (red-screen register dump)
 lib/       kmemset, kmemcpy, kstrlen, kstrcpy, kstrcmp, kstrncmp
 mm/        multiboot.h, PMM (bitmap), VMM (4 KB pages), heap (kmalloc/kfree)
-proc/      task.h/c (task struct, create/yield/sleep/exit), scheduler.h/c
+proc/      task.h/c (task struct, create/yield/sleep/exit), scheduler.h/c,
+           syscall.h/c (int 0x80 dispatch, SYS_EXIT=0 SYS_WRITE=1),
+           usermode.h/c (enter_usermode — iret to ring-3)
 ```
 
 ## Boot Sequence
@@ -21,6 +24,7 @@ terminal_init → GDT (+ TSS) → PIC → IDT → exceptions_init
 → keyboard → timer (1 kHz) → sti
 → PMM (Multiboot mmap) → vmm_init (4 KB pages) → heap_init + pmm_reserve
 → scheduler_init (PID 0 = kernel/shell)
+→ syscall_init (registers int 0x80 handler, DPL=3 gate)
 → shell_run  [does not return]
 ```
 
@@ -37,7 +41,7 @@ Selectors: kernel-code=0x08, kernel-data=0x10, user-code=0x1B, user-data=0x23, T
 
 **PMM** (`mm/pmm.c`) — 128 KB uint32 bitmap, 1 bit/4 KB frame. Parses Multiboot mmap. Reserves 0–1 MB and kernel image. `pmm_alloc_frame()` / `pmm_free_frame()` / `pmm_reserve()`.
 
-**VMM** (`mm/vmm.c`) — 4 KB pages (PSE disabled). Two pre-allocated page tables cover 0–8 MB. **Page 0 unmapped** (null guard). `vmm_map(virt, phys, flags)` lazily allocates page tables from PMM; `vmm_unmap` + `invlpg`.
+**VMM** (`mm/vmm.c`) — 4 KB pages (PSE disabled). Two pre-allocated page tables cover 0–8 MB with VMM_USER set (ring-3 accessible for testing). **Page 0 unmapped** (null guard). `vmm_map(virt, phys, flags)` lazily allocates page tables from PMM; `vmm_unmap` + `invlpg`.
 
 **Heap** (`mm/heap.c`) — 2 MB at `_kernel_end`. First-fit linked-list. Forward+backward coalesce. Reserved in PMM.
 
@@ -59,13 +63,18 @@ Selectors: kernel-code=0x08, kernel-data=0x10, user-code=0x1B, user-data=0x23, T
 | `0x20–0x2F` | Remapped IRQ vectors |
 | `0x28` | TSS selector |
 
+**Syscalls** (`proc/syscall.c`) — `int 0x80` gate (DPL=3, vector 0x80). Dispatch on `eax`: 0=exit (→ task_exit), 1=write (ebx = `const char *` → terminal_print). Return value in eax via `regs->eax`.
+
+**User mode** (`proc/usermode.c`) — `enter_usermode(fn, user_stack_top)`: sets TSS.esp0 to top of current task's kernel stack, switches DS/ES/FS/GS to GDT_USER_DATA, builds iret frame (SS/ESP/EFLAGS+IF/CS/EIP), executes `iret`. Never returns. First 8 MB pages carry VMM_USER so kernel-mapped ring-3 code can execute.
+
 ## Shell Commands
-`help` `clear` `echo` `ticks` `meminfo` `ps` `sleep <ms>` `version` `halt`
+`help` `clear` `echo` `ticks` `meminfo` `ps` `sleep <ms>` `usertest` `version` `halt`
+
+`usertest` — spawns a kernel task that immediately calls `enter_usermode`; the user function prints via SYS_WRITE then calls SYS_EXIT, and control returns to the scheduler.
 
 ## Future Developments (priority order)
-1. **User mode** — ring-3 iret entry, per-task page directory, `tss_set_kernel_stack` per switch.
-2. **System calls** — `int 0x80` gate (DPL=3), dispatch table, `write` + `exit` to start.
-3. **Preemptive scheduling** — context-switch from inside IRQ0 handler; requires saving full interrupt frame.
-4. **ELF loader** — parse ELF32 headers, map PT_LOAD segments into a new page directory.
-5. **Higher-half kernel** — remap kernel to 0xC0000000; update linker, boot stub, VMM.
-6. **initrd / VFS** — GRUB module as tar/CPIO; `open`/`read`/`close` shim.
+1. **Preemptive scheduling** — context-switch from inside IRQ0 handler; requires saving full interrupt frame.
+2. **Per-task page directories** — each task gets its own CR3; kernel identity-mapped in upper half of every PD.
+3. **ELF loader** — parse ELF32 headers, map PT_LOAD segments into a new page directory.
+4. **Higher-half kernel** — remap kernel to 0xC0000000; update linker, boot stub, VMM.
+5. **initrd / VFS** — GRUB module as tar/CPIO; `open`/`read`/`close` shim.

@@ -74,6 +74,9 @@ ISR_NOERR 29
 ISR_ERR   30
 ISR_NOERR 31
 
+/* Syscall gate — vector 0x80, user-callable via  int $0x80 */
+ISR_NOERR 128
+
 /* Hardware IRQs 0-15 mapped to vectors 0x20-0x2F */
 IRQ  0, 0x20
 IRQ  1, 0x21

@@ -10,7 +10,7 @@ extern void switch_context(uint32_t *old_esp_ptr, uint32_t new_esp);
 
 static task_t  *current   = NULL;
 static task_t  *task_list = NULL;
-static uint32_t next_pid  = 0;
+static uint32_t next_pid  = 1;  /* 0 reserved for the boot/kernel task */
 
 /* ── Internal helpers ─────────────────────────────────────────────────── */
 

@@ -3,8 +3,9 @@
 
 #define IDT_ENTRIES 256
 
-/* Interrupt gate: present, ring 0, 32-bit interrupt gate type (0xE). */
-#define IDT_GATE_INT32_RING0 0x8E
+/* Interrupt gate: present, 32-bit interrupt gate type (0xE). */
+#define IDT_GATE_INT32_RING0 0x8E  /* DPL=0 — kernel-only       */
+#define IDT_GATE_INT32_RING3 0xEE  /* DPL=3 — callable from ring 3 */
 
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_ptr_t   idt_ptr;
@@ -30,6 +31,8 @@ extern void irq6(void);  extern void irq7(void);  extern void irq8(void);
 extern void irq9(void);  extern void irq10(void); extern void irq11(void);
 extern void irq12(void); extern void irq13(void); extern void irq14(void);
 extern void irq15(void);
+
+extern void isr128(void); /* int 0x80 syscall gate */
 
 static void idt_set_gate(uint8_t vec, void (*handler)(void)) {
     uint32_t addr = (uint32_t)handler;
@@ -81,6 +84,10 @@ void idt_init(void) {
     idt_set_gate(0x2A, irq10); idt_set_gate(0x2B, irq11);
     idt_set_gate(0x2C, irq12); idt_set_gate(0x2D, irq13);
     idt_set_gate(0x2E, irq14); idt_set_gate(0x2F, irq15);
+
+    /* int 0x80 syscall gate — DPL=3 so ring-3 code can invoke it */
+    idt_set_gate(0x80, isr128);
+    idt[0x80].type_attr = IDT_GATE_INT32_RING3;
 
     __asm__ volatile ("lidt %0" : : "m"(idt_ptr));
 }
