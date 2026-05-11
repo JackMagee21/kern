@@ -45,7 +45,7 @@ Selectors: kernel-code=0x08, kernel-data=0x10, user-code=0x1B, user-data=0x23, T
 
 **Heap** (`mm/heap.c`) — 2 MB at `_kernel_end`. First-fit linked-list. Forward+backward coalesce. Reserved in PMM.
 
-**Scheduler** (`proc/scheduler.c`) — cooperative round-robin. `scheduler_init()` wraps boot context as PID 0. `scheduler_tick()` (called by PIT IRQ0 every ms) wakes sleeping tasks. No preemption.
+**Scheduler** (`proc/scheduler.c`) — **preemptive** round-robin, 10 ms quantum. `scheduler_init()` wraps boot context as PID 0. `scheduler_tick()` (called by PIT IRQ0 every ms): wakes sleeping tasks, then on quantum expiry calls `task_yield()` if another READY task exists. EOI is sent *before* the handler in `isr_dispatch` so the PIC is unmasked before any context switch.
 
 **Tasks** (`proc/task.c`) — `task_create(name, fn)` kmallocs a `task_t` (8 KB stack), builds initial stack frame. `task_yield()` finds next READY task, calls `switch_context`. `task_sleep(ms)` marks SLEEPING + yields; if no other task is ready, spins with `hlt` until timer wakes it. `task_exit()` marks DEAD + yields.
 
@@ -73,8 +73,7 @@ Selectors: kernel-code=0x08, kernel-data=0x10, user-code=0x1B, user-data=0x23, T
 `usertest` — spawns a kernel task that immediately calls `enter_usermode`; the user function prints via SYS_WRITE then calls SYS_EXIT, and control returns to the scheduler.
 
 ## Future Developments (priority order)
-1. **Preemptive scheduling** — context-switch from inside IRQ0 handler; requires saving full interrupt frame.
-2. **Per-task page directories** — each task gets its own CR3; kernel identity-mapped in upper half of every PD.
+1. **Per-task page directories** — each task gets its own CR3; kernel identity-mapped in upper half of every PD.
 3. **ELF loader** — parse ELF32 headers, map PT_LOAD segments into a new page directory.
 4. **Higher-half kernel** — remap kernel to 0xC0000000; update linker, boot stub, VMM.
 5. **initrd / VFS** — GRUB module as tar/CPIO; `open`/`read`/`close` shim.

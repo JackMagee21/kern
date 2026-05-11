@@ -7,6 +7,11 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Time-slice length in milliseconds (timer fires at 1 kHz). */
+#define SCHED_QUANTUM_MS 10u
+
+static uint32_t sched_quantum = 0;
+
 static const char *state_name(task_state_t s) {
     switch (s) {
         case TASK_RUNNING:  return "running ";
@@ -45,11 +50,29 @@ void scheduler_tick(void) {
 
     uint32_t now = timer_get_ticks();
     task_t  *t   = head;
+
+    /* Wake any tasks whose sleep period has expired. */
     do {
         if (t->state == TASK_SLEEPING && t->sleep_until <= now)
             t->state = TASK_READY;
         t = t->next;
     } while (t != head);
+
+    /* Preempt the current task once per quantum if another task is ready.
+     * We check explicitly before calling task_yield so we never enter the
+     * hlt spin loop inside task_yield while interrupts are disabled. */
+    if (++sched_quantum < SCHED_QUANTUM_MS)
+        return;
+    sched_quantum = 0;
+
+    t = task_current()->next;
+    while (t != task_current()) {
+        if (t->state == TASK_READY) {
+            task_yield();
+            return;
+        }
+        t = t->next;
+    }
 }
 
 void scheduler_print_tasks(void) {

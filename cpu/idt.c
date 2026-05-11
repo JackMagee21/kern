@@ -45,13 +45,19 @@ static void idt_set_gate(uint8_t vec, void (*handler)(void)) {
 
 /* Called from isr_common in isr.s */
 void isr_dispatch(registers_t *regs) {
+    /*
+     * Send EOI before invoking the handler.  If the handler triggers a
+     * context switch (e.g. scheduler_tick → task_yield), isr_dispatch will
+     * not return until the original task is scheduled again — potentially
+     * much later.  Sending EOI first ensures the PIC unmasks IRQ0 immediately
+     * so other tasks continue to receive timer ticks while we are away.
+     */
+    if (regs->int_no >= PIC_IRQ_BASE && regs->int_no < PIC_IRQ_BASE + 16)
+        pic_send_eoi(regs->int_no - PIC_IRQ_BASE);
+
     isr_handler_t h = handlers[regs->int_no];
     if (h)
         h(regs);
-
-    /* Send EOI for hardware IRQs (vectors 0x20-0x2F). */
-    if (regs->int_no >= PIC_IRQ_BASE && regs->int_no < PIC_IRQ_BASE + 16)
-        pic_send_eoi(regs->int_no - PIC_IRQ_BASE);
 }
 
 void idt_register_handler(uint8_t vector, isr_handler_t handler) {
