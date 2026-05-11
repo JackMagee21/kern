@@ -7,6 +7,7 @@
 #include "keyboard.h"
 #include "timer.h"
 #include "printf.h"
+#include "shell.h"
 
 void kernel_main(void) {
     terminal_init();
@@ -23,14 +24,11 @@ void kernel_main(void) {
     keyboard_init();
     terminal_print("[OK] Keyboard ready\n");
 
-    timer_init(1000); /* 1000 Hz — one tick per millisecond */
+    timer_init(1000);
     terminal_print("[OK] Timer ready\n");
 
     __asm__ volatile ("sti");
-    terminal_print("[OK] Interrupts enabled\n\n");
+    terminal_print("[OK] Interrupts enabled\n");
 
-    kprintf("Ticks so far: %u\n", timer_get_ticks());
-    kprintf("Type something: ");
-
-    for (;;) {}
+    shell_run(); /* does not return */
 }

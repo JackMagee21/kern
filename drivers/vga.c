@@ -38,11 +38,30 @@ void terminal_init(void) {
                 vga_make_entry(' ', terminal_color);
 }
 
+void terminal_clear(void) {
+    for (size_t r = 0; r < VGA_HEIGHT; r++)
+        for (size_t c = 0; c < VGA_WIDTH; c++)
+            terminal_buffer[r * VGA_WIDTH + c] =
+                vga_make_entry(' ', terminal_color);
+    terminal_row = 0;
+    terminal_col = 0;
+}
+
 void terminal_putchar(char c) {
     if (c == '\n') {
         terminal_col = 0;
         if (++terminal_row == VGA_HEIGHT)
             terminal_scroll();
+        return;
+    }
+
+    if (c == '\b') {
+        if (terminal_col > 0) {
+            terminal_col--;
+        } else if (terminal_row > 0) {
+            terminal_row--;
+            terminal_col = VGA_WIDTH - 1;
+        }
         return;
     }
 

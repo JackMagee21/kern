@@ -1,1 +1,92 @@
-My own personal kernel project
+Kern 2.0
+========
+
+A hobby x86 kernel written in C and x86 assembly, built from scratch without
+any standard library. Boots via GRUB (Multiboot), runs in 32-bit protected
+mode, and provides an interactive shell over PS/2 keyboard input.
+
+
+Build Requirements
+------------------
+
+  - i686-elf-gcc     (cross-compiler targeting bare-metal x86)
+  - i686-elf-ld      (cross-linker)
+  - GRUB             (grub-mkrescue)
+  - xorriso          (ISO generation)
+  - QEMU (optional)  (qemu-system-i386, for running locally)
+
+
+Building and Running
+--------------------
+
+  make              Build the kernel and produce kern.iso
+  make run          Build and launch in QEMU
+  make run-headless Launch in QEMU with output redirected to stdio
+  make clean        Remove all build artefacts
+
+
+Project Structure
+-----------------
+
+  boot/             Multiboot-compliant assembly entry point and stack setup
+  kernel/           Kernel main, printf, and shell
+  cpu/              GDT, IDT, ISR stubs, PIC driver, and I/O port helpers
+  drivers/          VGA text-mode driver, PS/2 keyboard driver, PIT timer
+
+
+Kernel Subsystems
+-----------------
+
+GDT (Global Descriptor Table)
+  Sets up three segments: null, kernel code (ring 0), and kernel data (ring 0),
+  each covering the full 4 GB address space in 32-bit protected mode. Loaded
+  via a far jump to flush the CPU pipeline and reload all segment registers.
+
+IDT + PIC (Interrupt Descriptor Table / Programmable Interrupt Controller)
+  The 8259 PIC is remapped so hardware IRQs 0-15 land on vectors 0x20-0x2F,
+  avoiding collision with the CPU's reserved exception vectors (0-31). The IDT
+  is populated with 32 exception gates and 16 hardware IRQ gates, each backed
+  by an assembly stub that saves CPU state, calls a C dispatch function, sends
+  EOI, and returns via iret. Per-vector handlers can be registered at runtime.
+
+PS/2 Keyboard (IRQ 1)
+  Reads scan code set 1 from I/O port 0x60 on each IRQ 1 fire. Translated
+  characters are placed in a 256-byte circular buffer. The shell reads from
+  this buffer via a blocking call that halts the CPU until a key arrives.
+
+PIT Timer (IRQ 0)
+  Programs channel 0 of the 8253/8254 PIT to fire at 1000 Hz (one tick per
+  millisecond). A volatile tick counter is incremented on each IRQ, providing
+  a monotonic millisecond clock via timer_get_ticks().
+
+VGA Text Driver
+  Writes directly to the VGA framebuffer at 0xB8000 (80x25 characters). Handles
+  newlines, horizontal scrolling, screen scroll, and backspace cursor movement.
+
+kprintf
+  A minimal kernel printf supporting %c, %s, %d, %u, %x, and %X. Implemented
+  with stdarg.h (available in freestanding GCC) and no heap dependency.
+
+Shell
+  A simple interactive command interpreter. Displays a prompt, reads a line
+  with backspace editing, parses the first word as a command name, and
+  dispatches to the matching handler.
+
+
+Shell Commands
+--------------
+
+  help              List available commands
+  clear             Clear the screen
+  echo <text>       Print text to the screen
+  ticks             Show milliseconds elapsed since boot
+  halt              Disable interrupts and halt the CPU
+
+
+Planned / Next Steps
+--------------------
+
+  - Physical memory manager (parse Multiboot memory map, bitmap allocator)
+  - Virtual memory and paging (page directory / page table setup)
+  - Heap allocator (kmalloc / kfree)
+  - User mode and system calls
