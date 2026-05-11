@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "name": "Kern",
+            "includePath": [
+                "${workspaceFolder}/boot",
+                "${workspaceFolder}/cpu",
+                "${workspaceFolder}/drivers",
+                "${workspaceFolder}/kernel",
+                "${workspaceFolder}/mm",
+                "${workspaceFolder}/lib"
+            ],
+            "defines": [
+                "__i386__"
+            ],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "gnu99",
+            "intelliSenseMode": "gcc-x86"
+        }
+    ],
+    "version": 4
+}

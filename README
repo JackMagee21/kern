@@ -29,9 +29,11 @@ Project Structure
 -----------------
 
   boot/             Multiboot-compliant assembly entry point and stack setup
-  kernel/           Kernel main, printf, and shell
   cpu/              GDT, IDT, ISR stubs, PIC driver, and I/O port helpers
   drivers/          VGA text-mode driver, PS/2 keyboard driver, PIT timer
+  kernel/           Kernel main, printf, and shell
+  lib/              Freestanding string/memory utilities (kmemset, kmemcpy, …)
+  mm/               Memory management: PMM, paging (VMM), and heap allocator
 
 
 Kernel Subsystems
@@ -67,6 +69,27 @@ kprintf
   A minimal kernel printf supporting %c, %s, %d, %u, %x, and %X. Implemented
   with stdarg.h (available in freestanding GCC) and no heap dependency.
 
+PMM (Physical Memory Manager)  [mm/pmm.c]
+  Parses the Multiboot memory map provided by GRUB and builds a 128 KB bitmap
+  (one bit per 4 KB frame, covering the full 4 GB address space). Available
+  frames are marked free; the first 1 MB and the kernel image are permanently
+  reserved. Provides pmm_alloc_frame() / pmm_free_frame() for single-frame
+  allocation and pmm_reserve() to protect arbitrary ranges (e.g. the heap).
+
+VMM / Paging  [mm/vmm.c]
+  Enables PSE (Page Size Extension) in CR4, builds a 1024-entry page directory
+  where every PDE maps a 4 MB identity-mapped region (virtual == physical), and
+  activates paging by setting CR0.PG. The full 4 GB address space is covered,
+  keeping all physical addresses directly accessible at their identity addresses.
+
+Heap Allocator  [mm/heap.c]
+  A linked-list free-list allocator placed in a 2 MB region immediately after
+  the kernel image (_kernel_end). Each block carries a header (magic, size,
+  free flag, prev/next pointers). kmalloc() performs a first-fit search;
+  kfree() coalesces adjacent free blocks to prevent fragmentation. The heap
+  region is registered with the PMM via pmm_reserve() so frame allocation
+  never overlaps it.
+
 Shell
   A simple interactive command interpreter. Displays a prompt, reads a line
   with backspace editing, parses the first word as a command name, and
@@ -79,14 +102,18 @@ Shell Commands
   help              List available commands
   clear             Clear the screen
   echo <text>       Print text to the screen
-  ticks             Show milliseconds elapsed since boot
+  ticks             Milliseconds elapsed since boot
+  meminfo           Physical memory and heap statistics
+  version           Kernel version and subsystem summary
   halt              Disable interrupts and halt the CPU
 
 
 Planned / Next Steps
 --------------------
 
-  - Physical memory manager (parse Multiboot memory map, bitmap allocator)
-  - Virtual memory and paging (page directory / page table setup)
-  - Heap allocator (kmalloc / kfree)
-  - User mode and system calls
+  - Page-fault handler and demand mapping
+  - Higher-half kernel (map kernel at 0xC0000000)
+  - Per-process page directories (user-space isolation)
+  - System calls (int 0x80 / sysenter)
+  - ELF loader for user-space programs
+  - Simple filesystem (initrd / tar-based)

@@ -33,4 +33,8 @@ SECTIONS {
         *(COMMON)
         *(.bss)
     }
+
+    /* First byte after the kernel image — used by the PMM to know what to
+     * reserve, and by kernel_main as the start of the heap region. */
+    _kernel_end = .;
 }

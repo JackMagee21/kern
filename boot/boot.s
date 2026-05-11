@@ -36,6 +36,14 @@ _start:
     /* Set up the stack pointer */
     mov $stack_top, %esp
 
+    /*
+     * Pass the Multiboot magic and info-structure pointer to kernel_main.
+     * GRUB leaves: eax = 0x2BADB002 (magic), ebx = physical addr of mbi.
+     * cdecl: push right-to-left, so push ebx first (arg 2), then eax (arg 1).
+     */
+    push %ebx   /* arg 2: multiboot_info_t * */
+    push %eax   /* arg 1: magic number       */
+
     /* Call the C kernel — this should never return */
     call kernel_main
 
