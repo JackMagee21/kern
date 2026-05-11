@@ -4,6 +4,9 @@
 #include "gdt.h"
 #include "idt.h"
 #include "pic.h"
+#include "keyboard.h"
+#include "timer.h"
+#include "printf.h"
 
 void kernel_main(void) {
     terminal_init();
@@ -17,11 +20,17 @@ void kernel_main(void) {
     idt_init();
     terminal_print("[OK] IDT loaded\n");
 
-    __asm__ volatile ("sti"); /* enable interrupts */
-    terminal_print("[OK] Interrupts enabled\n");
+    keyboard_init();
+    terminal_print("[OK] Keyboard ready\n");
 
-    terminal_print("\n");
-    terminal_print("Hello world!");
+    timer_init(1000); /* 1000 Hz — one tick per millisecond */
+    terminal_print("[OK] Timer ready\n");
+
+    __asm__ volatile ("sti");
+    terminal_print("[OK] Interrupts enabled\n\n");
+
+    kprintf("Ticks so far: %u\n", timer_get_ticks());
+    kprintf("Type something: ");
 
     for (;;) {}
 }
