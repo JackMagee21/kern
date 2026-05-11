@@ -8,7 +8,8 @@
                 "${workspaceFolder}/drivers",
                 "${workspaceFolder}/kernel",
                 "${workspaceFolder}/mm",
-                "${workspaceFolder}/lib"
+                "${workspaceFolder}/lib",
+                "${workspaceFolder}/proc"
             ],
             "defines": [
                 "__i386__"

@@ -3,7 +3,7 @@ AS      := i686-elf-gcc
 LD      := i686-elf-ld
 
 CFLAGS  := -ffreestanding -nostdlib -O2 -Wall -Wextra -std=gnu99 -m32 \
-           -Idrivers -Icpu -Ikernel -Imm -Ilib
+           -Idrivers -Icpu -Ikernel -Imm -Ilib -Iproc
 ASFLAGS := -ffreestanding -nostdlib -m32
 
 BUILD   := build

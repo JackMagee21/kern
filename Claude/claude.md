@@ -5,54 +5,67 @@ x86 (i686), 32-bit protected mode, GRUB Multiboot, no stdlib, cross-compiled wit
 
 ## Directory Layout
 ```
-boot/      entry point (_start), stack, passes eax/ebx to kernel_main
-cpu/       GDT, IDT (256 gates), ISR/IRQ stubs, PIC remap, io.h, exception handlers
-drivers/   VGA (0xB8000, 80×25, terminal_set_color), PS/2 keyboard, PIT timer (1 kHz)
-kernel/    kernel_main, kprintf, shell, kpanic (register-dump panic screen)
+boot/      entry point (_start), 16 KB stack, passes eax/ebx to kernel_main
+cpu/       GDT (6 entries), IDT (256 gates), ISR/IRQ stubs, PIC, io.h,
+           TSS, exception handlers, context_switch.s
+drivers/   VGA (80×25, terminal_set_color), PS/2 keyboard, PIT 1 kHz (tick callback)
+kernel/    kernel_main, kprintf, shell, kpanic (red-screen register dump)
 lib/       kmemset, kmemcpy, kstrlen, kstrcpy, kstrcmp, kstrncmp
-mm/        PMM (bitmap), VMM (4 KB pages), heap (linked-list kmalloc/kfree)
+mm/        multiboot.h, PMM (bitmap), VMM (4 KB pages), heap (kmalloc/kfree)
+proc/      task.h/c (task struct, create/yield/sleep/exit), scheduler.h/c
 ```
 
 ## Boot Sequence
 ```
-terminal_init → GDT → PIC → IDT → exceptions_init → keyboard → timer → sti
-→ PMM (parse Multiboot mmap) → vmm_init (4 KB paging) → heap_init + pmm_reserve
+terminal_init → GDT (+ TSS) → PIC → IDT → exceptions_init
+→ keyboard → timer (1 kHz) → sti
+→ PMM (Multiboot mmap) → vmm_init (4 KB pages) → heap_init + pmm_reserve
+→ scheduler_init (PID 0 = kernel/shell)
 → shell_run  [does not return]
 ```
 
 ## Subsystems
 
-**GDT** — null / kernel-code (0x9A) / kernel-data (0x92), flat 4 GB, loaded via `gdt_flush.s`.
+**GDT** (6 entries) — null / kernel-code (0x9A) / kernel-data (0x92) /
+user-code (0xFA, DPL=3) / user-data (0xF2, DPL=3) / TSS (0x89).
+Selectors: kernel-code=0x08, kernel-data=0x10, user-code=0x1B, user-data=0x23, TSS=0x28.
 
-**IDT** — 32 exception + 16 IRQ gates. Per-vector handler table; `isr_dispatch` sends EOI.
+**TSS** (`cpu/tss.c`) — esp0/ss0 set to kernel data segment. iomap_base = sizeof(tss_t) (no I/O bitmap). `tss_set_kernel_stack(esp)` updates esp0 per-task before ring-3 entry.
 
-**Exception handlers** (`cpu/exceptions.c`) — All 32 CPU exceptions (0–31) registered via `exceptions_init()`. Each calls `kpanic()`.
+**Exception handlers** (`cpu/exceptions.c`) — all 32 vectors (0–31) call `kpanic`.
+**kpanic** (`kernel/panic.c`) — CLI, white-on-red screen, exception name table, full register dump, CR2 + error-code decode for #PF (#14).
 
-**kpanic** (`kernel/panic.c`) — Disables interrupts, switches VGA to white-on-red, prints exception name, error code, full register dump (EAX–EIP/EFLAGS/CS/DS). For #14 (Page Fault) also reads CR2 and decodes the error code (present/write/user bits). Halts permanently.
+**PMM** (`mm/pmm.c`) — 128 KB uint32 bitmap, 1 bit/4 KB frame. Parses Multiboot mmap. Reserves 0–1 MB and kernel image. `pmm_alloc_frame()` / `pmm_free_frame()` / `pmm_reserve()`.
 
-**PMM** (`mm/pmm.c`) — 128 KB uint32 bitmap (1 bit/4 KB frame). Parses Multiboot mmap. Reserves first 1 MB + kernel image. `pmm_alloc_frame()` / `pmm_free_frame()` / `pmm_reserve()`.
+**VMM** (`mm/vmm.c`) — 4 KB pages (PSE disabled). Two pre-allocated page tables cover 0–8 MB. **Page 0 unmapped** (null guard). `vmm_map(virt, phys, flags)` lazily allocates page tables from PMM; `vmm_unmap` + `invlpg`.
 
-**VMM** (`mm/vmm.c`) — 4 KB pages (PSE disabled). Pre-allocates two 4 KB page tables covering 0–8 MB and identity-maps them. **Page 0 (0x0000–0x0FFF) is intentionally unmapped** — null-pointer dereferences trigger #PF. `vmm_map(virt, phys, flags)` allocates a new page table from the PMM on demand; `vmm_unmap(virt)` clears the PTE and calls `invlpg`.
+**Heap** (`mm/heap.c`) — 2 MB at `_kernel_end`. First-fit linked-list. Forward+backward coalesce. Reserved in PMM.
 
-**Heap** (`mm/heap.c`) — 2 MB at `_kernel_end`. First-fit linked-list; forward+backward coalesce on free. Region reserved in PMM.
+**Scheduler** (`proc/scheduler.c`) — cooperative round-robin. `scheduler_init()` wraps boot context as PID 0. `scheduler_tick()` (called by PIT IRQ0 every ms) wakes sleeping tasks. No preemption.
 
-**Shell** — `help`, `clear`, `echo`, `ticks`, `meminfo`, `version`, `halt`.
+**Tasks** (`proc/task.c`) — `task_create(name, fn)` kmallocs a `task_t` (8 KB stack), builds initial stack frame. `task_yield()` finds next READY task, calls `switch_context`. `task_sleep(ms)` marks SLEEPING + yields; if no other task is ready, spins with `hlt` until timer wakes it. `task_exit()` marks DEAD + yields.
+
+**context_switch** (`cpu/context_switch.s`) — saves ebx/esi/edi/ebp/eflags onto current stack, stores ESP in `*old_esp_ptr`, loads new ESP, restores and `ret` into new task.
 
 ## Key Addresses / Symbols
 | Symbol / Address | Meaning |
 |---|---|
-| `0x00000000–0x00000FFF` | **Not mapped** (null-pointer guard) |
+| `0x00000000–0x00000FFF` | **Not mapped** — null-pointer guard |
 | `0x00001000–0x007FFFFF` | Identity-mapped (first 8 MB) |
 | `0x00100000` | Kernel load address |
 | `_kernel_end` | First byte past kernel image |
 | `_kernel_end + 0` | Heap start (2 MB) |
 | `0x000B8000` | VGA text framebuffer |
 | `0x20–0x2F` | Remapped IRQ vectors |
+| `0x28` | TSS selector |
+
+## Shell Commands
+`help` `clear` `echo` `ticks` `meminfo` `ps` `sleep <ms>` `version` `halt`
 
 ## Future Developments (priority order)
-1. **Higher-half kernel** — remap kernel to 0xC0000000; update linker script, boot stub, and VMM. Standard layout for user-space separation.
-2. **User mode** — ring-3 GDT segments, TSS, `iret` to user EIP.
-3. **System calls** — `int 0x80` gate, syscall dispatch table, basic ABI (write, exit).
-4. **ELF loader** — parse ELF32, map PT_LOAD segments into a new page directory.
-5. **Scheduler** — round-robin task list, context-switch (save/restore regs + CR3 swap).
+1. **User mode** — ring-3 iret entry, per-task page directory, `tss_set_kernel_stack` per switch.
+2. **System calls** — `int 0x80` gate (DPL=3), dispatch table, `write` + `exit` to start.
+3. **Preemptive scheduling** — context-switch from inside IRQ0 handler; requires saving full interrupt frame.
+4. **ELF loader** — parse ELF32 headers, map PT_LOAD segments into a new page directory.
+5. **Higher-half kernel** — remap kernel to 0xC0000000; update linker, boot stub, VMM.
 6. **initrd / VFS** — GRUB module as tar/CPIO; `open`/`read`/`close` shim.

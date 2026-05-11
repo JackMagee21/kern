@@ -3,6 +3,7 @@
 #include "pic.h"
 #include "io.h"
 #include <stdint.h>
+#include <stddef.h>
 
 #define PIT_CHANNEL0 0x40
 #define PIT_CMD      0x43
@@ -11,10 +12,16 @@
 #define PIT_BASE_HZ  1193182
 
 static volatile uint32_t ticks = 0;
+static timer_tick_cb_t   tick_cb = NULL;
+
+void timer_set_tick_callback(timer_tick_cb_t cb) {
+    tick_cb = cb;
+}
 
 static void timer_handler(registers_t *regs) {
     (void)regs;
     ticks++;
+    if (tick_cb) tick_cb();
 }
 
 uint32_t timer_get_ticks(void) {

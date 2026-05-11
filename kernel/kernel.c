@@ -14,18 +14,19 @@
 #include "heap.h"
 #include "exceptions.h"
 #include "panic.h"
+#include "scheduler.h"
 
 /* Defined by the linker script — first byte after the kernel image. */
 extern uint32_t _kernel_end;
 
-/* 2 MB kernel heap, placed immediately after the kernel binary. */
+/* 2 MB kernel heap placed immediately after the kernel binary. */
 #define HEAP_SIZE (2u * 1024u * 1024u)
 
 void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     terminal_init();
 
     gdt_init();
-    terminal_print("[OK] GDT loaded\n");
+    terminal_print("[OK] GDT loaded  (ring-0, ring-3, TSS)\n");
 
     pic_init();
     terminal_print("[OK] PIC remapped\n");
@@ -40,36 +41,38 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     terminal_print("[OK] Keyboard ready\n");
 
     timer_init(1000);
-    terminal_print("[OK] Timer ready\n");
+    terminal_print("[OK] Timer ready  (1 kHz)\n");
 
     __asm__ volatile ("sti");
     terminal_print("[OK] Interrupts enabled\n");
 
-    /* Verify we were launched by a Multiboot-compliant bootloader. */
+    /* Verify Multiboot magic before touching the info structure. */
     if (magic != MULTIBOOT_MAGIC) {
         terminal_print("[ERR] Not loaded by a Multiboot bootloader — halting.\n");
         __asm__ volatile ("cli; hlt");
         __builtin_unreachable();
     }
 
-    /* Physical memory manager — parses the Multiboot mmap. */
+    /* Physical memory manager. */
     pmm_init(mbi_addr, (uint32_t)&_kernel_end);
-    kprintf("[OK] PMM ready  — %u MB free (%u frames)\n",
+    kprintf("[OK] PMM ready     — %u MB free (%u frames)\n",
             (uint32_t)((pmm_get_free() * 4) / 1024),
             (uint32_t)pmm_get_free());
 
-    /* Virtual memory — identity-map 4 GB with 4 MB PSE pages, enable paging. */
+    /* Paging: 4 KB identity-mapped pages, page 0 unmapped. */
     vmm_init();
-    terminal_print("[OK] Paging enabled (identity-mapped)\n");
+    terminal_print("[OK] Paging enabled  (4 KB pages, page 0 guard)\n");
 
-    /* Heap — 2 MB region starting at the first byte past the kernel image.
-     * We also tell the PMM to reserve those frames so pmm_alloc_frame()
-     * won't accidentally return addresses inside the heap. */
+    /* Heap: 2 MB region right after the kernel image. */
     uint32_t heap_start = (uint32_t)&_kernel_end;
     heap_init(heap_start, HEAP_SIZE);
     pmm_reserve(heap_start, HEAP_SIZE);
-    kprintf("[OK] Heap ready — %u KB at 0x%x\n",
+    kprintf("[OK] Heap ready    — %u KB at 0x%x\n",
             (uint32_t)(HEAP_SIZE / 1024), heap_start);
+
+    /* Cooperative task scheduler (wraps the boot context as PID 0). */
+    scheduler_init();
+    terminal_print("[OK] Scheduler ready\n");
 
     shell_run(); /* does not return */
 }
