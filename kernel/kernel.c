@@ -12,6 +12,8 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "heap.h"
+#include "exceptions.h"
+#include "panic.h"
 
 /* Defined by the linker script — first byte after the kernel image. */
 extern uint32_t _kernel_end;
@@ -30,6 +32,9 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
 
     idt_init();
     terminal_print("[OK] IDT loaded\n");
+
+    exceptions_init();
+    terminal_print("[OK] Exception handlers registered\n");
 
     keyboard_init();
     terminal_print("[OK] Keyboard ready\n");

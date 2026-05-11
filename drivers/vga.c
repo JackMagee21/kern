@@ -79,3 +79,7 @@ void terminal_print(const char *str) {
     for (size_t i = 0; str[i] != '\0'; i++)
         terminal_putchar(str[i]);
 }
+
+void terminal_set_color(vga_color fg, vga_color bg) {
+    terminal_color = vga_make_color(fg, bg);
+}
