@@ -12,12 +12,23 @@ static void syscall_handler(registers_t *regs) {
         case SYS_EXIT:
             task_exit();
 
-        /* SYS_WRITE (1): write a null-terminated string to the terminal.
-         *   ebx = virtual address of string (in caller's address space). */
-        case SYS_WRITE:
-            terminal_print((const char *)(uintptr_t)regs->ebx);
-            regs->eax = 0;
+        /* SYS_WRITE (1): write bytes to a file descriptor.
+         *   ebx = fd  (1 = stdout)
+         *   ecx = virtual address of buffer
+         *   edx = byte count
+         *   Returns bytes written in eax, or (uint32_t)-1 on error. */
+        case SYS_WRITE: {
+            uint32_t fd  = regs->ebx;
+            const char *buf = (const char *)(uintptr_t)regs->ecx;
+            uint32_t len = regs->edx;
+            if (fd == 1) {
+                for (uint32_t i = 0; i < len; i++) terminal_putchar(buf[i]);
+                regs->eax = len;
+            } else {
+                regs->eax = (uint32_t)-1;
+            }
             break;
+        }
 
         /* SYS_OPEN (2): open a file by name.
          *   ebx = virtual address of null-terminated path string.
@@ -63,6 +74,11 @@ static void syscall_handler(registers_t *regs) {
             regs->eax = 0;
             break;
         }
+
+        /* SYS_GETPID (5): return the calling task's PID. */
+        case SYS_GETPID:
+            regs->eax = task_current()->pid;
+            break;
 
         default:
             regs->eax = (uint32_t)-1;

@@ -79,6 +79,7 @@ static void cmd_help(const char *args) {
     terminal_print("  meminfo           physical memory and heap statistics\n");
     terminal_print("  ps                list all tasks\n");
     terminal_print("  sleep <ms>        sleep for <ms> milliseconds\n");
+    terminal_print("  ls                list files in the initrd\n");
     terminal_print("  usertest          spawn a ring-3 task via int 0x80\n");
     terminal_print("  exec <file>       load and run an ELF from the initrd\n");
     terminal_print("  version           kernel version summary\n");
@@ -142,6 +143,17 @@ static void cmd_version(const char *args) {
     terminal_print("  Devices:   VGA 80x25, PS/2 keyboard, PIT 1 kHz, serial COM1\n");
     terminal_print("  Process:   cooperative scheduler, task_yield/sleep\n");
     terminal_print("  User mode: ring-3 via iret, int 0x80 syscalls (exit, write)\n");
+}
+
+static void ls_print(const char *name, uint32_t size, void *ud) {
+    (void)ud;
+    kprintf("  %-24s  %u bytes\n", name, size);
+}
+
+static void cmd_ls(const char *args) {
+    (void)args;
+    terminal_print("initrd:\n");
+    vfs_list(ls_print, NULL);
 }
 
 static void cmd_exec(const char *args) {
@@ -208,6 +220,7 @@ static const command_t commands[] = {
     { "meminfo", cmd_meminfo },
     { "ps",      cmd_ps      },
     { "sleep",   cmd_sleep   },
+    { "ls",      cmd_ls      },
     { "usertest", cmd_usertest },
     { "exec",     cmd_exec     },
     { "version", cmd_version },

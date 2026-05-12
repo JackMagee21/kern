@@ -27,4 +27,12 @@ uint32_t vfs_read(vfs_file_t *f, void *buf, uint32_t len);
 /* Close (free) a file descriptor returned by vfs_open. */
 void vfs_close(vfs_file_t *f);
 
+/*
+ * Iterate over every file in the initrd.
+ * Calls cb(name, size, userdata) for each entry.
+ * Safe to call before vfs_init (does nothing).
+ */
+typedef void (*vfs_list_cb_t)(const char *name, uint32_t size, void *ud);
+void vfs_list(vfs_list_cb_t cb, void *ud);
+
 #endif

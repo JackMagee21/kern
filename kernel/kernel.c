@@ -74,21 +74,27 @@ void kernel_main(uint32_t magic, uint32_t mbi_phys) {
             (uint32_t)((pmm_get_free() * 4) / 1024),
             (uint32_t)pmm_get_free());
 
-    /* Heap: 2 MB immediately after the kernel image (virtual address). */
-    uint32_t heap_virt = (uint32_t)&_kernel_end;
-    uint32_t heap_phys = V2P(heap_virt);
+    /*
+     * Heap: 2 MB starting after the kernel image AND any GRUB modules.
+     * GRUB loads the initrd right after the kernel in physical memory;
+     * starting the heap before it would cause kmalloc to overwrite it.
+     */
+    uint32_t heap_phys = kernel_phys_end;
+    if ((mbi->flags & MULTIBOOT_FLAG_MODS) && mbi->mods_count > 0) {
+        multiboot_mod_t *mods =
+            (multiboot_mod_t *)(uintptr_t)P2V(mbi->mods_addr);
+        for (uint32_t i = 0; i < mbi->mods_count; i++) {
+            uint32_t end = (mods[i].mod_end + 0xFFFu) & ~0xFFFu; /* page-align */
+            if (end > heap_phys) heap_phys = end;
+        }
+    }
+    uint32_t heap_virt = (uint32_t)P2V(heap_phys);
     heap_init(heap_virt, HEAP_SIZE);
     pmm_reserve(heap_phys, HEAP_SIZE);
     kprintf("[OK] Heap ready    — %u KB at 0x%x (phys 0x%x)\n",
             (uint32_t)(HEAP_SIZE / 1024), heap_virt, heap_phys);
 
-    scheduler_init();
-    terminal_print("[OK] Scheduler ready  (preemptive, 10 ms quantum)\n");
-
-    syscall_init();
-    terminal_print("[OK] Syscalls ready  (int 0x80)\n");
-
-    /* Load the initrd from the first GRUB module, if present. */
+    /* Load the initrd (now safe — heap starts after it). */
     if ((mbi->flags & MULTIBOOT_FLAG_MODS) && mbi->mods_count > 0) {
         multiboot_mod_t *mods =
             (multiboot_mod_t *)(uintptr_t)P2V(mbi->mods_addr);
@@ -99,6 +105,12 @@ void kernel_main(uint32_t magic, uint32_t mbi_phys) {
         kprintf("[OK] Initrd loaded — %u bytes at phys 0x%x\n",
                 mod_size, mod_phys);
     }
+
+    scheduler_init();
+    terminal_print("[OK] Scheduler ready  (preemptive, 10 ms quantum)\n");
+
+    syscall_init();
+    terminal_print("[OK] Syscalls ready  (int 0x80)\n");
 
     shell_run();
 }
