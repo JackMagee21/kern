@@ -20,7 +20,7 @@ static void kcopy(void *dst, const void *src, size_t n) {
 
 /* ── elf_load ──────────────────────────────────────────────────────────── */
 
-uint32_t elf_load(const void *elf_data, uint32_t pd_phys) {
+uint32_t elf_load(const void *elf_data, uint32_t pd_phys, uint32_t *out_brk) {
     const Elf32_Ehdr *hdr = (const Elf32_Ehdr *)elf_data;
 
     /* Validate ELF magic, type, and architecture. */
@@ -30,6 +30,8 @@ uint32_t elf_load(const void *elf_data, uint32_t pd_phys) {
 
     const Elf32_Phdr *phdrs =
         (const Elf32_Phdr *)((const uint8_t *)elf_data + hdr->e_phoff);
+
+    uint32_t brk = 0; /* tracks highest virtual byte loaded */
 
     /* ── Load each PT_LOAD segment ──────────────────────────────────────── */
     for (uint16_t i = 0; i < hdr->e_phnum; i++) {
@@ -68,6 +70,9 @@ uint32_t elf_load(const void *elf_data, uint32_t pd_phys) {
 
             vmm_map_in_pd(pd_phys, page, frame_phys, flags);
         }
+
+        uint32_t seg_end = (vaddr + memsz + 0xFFFu) & ~0xFFFu;
+        if (seg_end > brk) brk = seg_end;
     }
 
     /* ── Allocate user stack ────────────────────────────────────────────── */
@@ -79,5 +84,6 @@ uint32_t elf_load(const void *elf_data, uint32_t pd_phys) {
         vmm_map_in_pd(pd_phys, p, f, stk_flags);
     }
 
+    if (out_brk) *out_brk = brk;
     return hdr->e_entry;
 }

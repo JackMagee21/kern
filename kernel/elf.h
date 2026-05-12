@@ -14,7 +14,9 @@
  * at USER_STACK_BASE..USER_STACK_TOP.
  *
  * Returns the ELF entry point (virtual), or 0 on error.
+ * *out_brk is set to the page-aligned end of the last loaded segment
+ * (the initial program break for sbrk).
  */
-uint32_t elf_load(const void *elf_data, uint32_t pd_phys);
+uint32_t elf_load(const void *elf_data, uint32_t pd_phys, uint32_t *out_brk);
 
 #endif

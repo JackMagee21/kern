@@ -28,6 +28,7 @@ typedef struct task {
     /* User-mode fields — set by task_exec, used by elf_task_trampoline. */
     uint32_t        user_entry;     /* ELF entry point (user virtual)       */
     uint32_t        user_stack_top; /* initial user stack pointer           */
+    uint32_t        brk;            /* program break (end of user heap)     */
     /* Open file descriptor table. */
     struct vfs_file *fds[TASK_MAX_FDS];
     struct task    *next;
@@ -56,6 +57,7 @@ task_t *task_exec(const char *name, const void *elf_data, uint32_t elf_size);
 
 void  task_yield(void);
 void  task_sleep(uint32_t ms);
+void  task_wait(task_t *t);   /* block until t reaches TASK_DEAD */
 __attribute__((noreturn)) void task_exit(void);
 
 #endif

@@ -3,6 +3,9 @@
 #include "task.h"
 #include "vfs.h"
 #include "vga.h"
+#include "vmm.h"
+#include "pmm.h"
+#include "keyboard.h"
 #include <stdint.h>
 
 static void syscall_handler(registers_t *regs) {
@@ -49,16 +52,37 @@ static void syscall_handler(registers_t *regs) {
         }
 
         /* SYS_READ (3): read bytes from an open file descriptor.
-         *   ebx = fd, ecx = buffer virtual address, edx = byte count.
-         *   Returns bytes read in eax, or (uint32_t)-1 on error. */
+         *   ebx = fd  (0 = stdin), ecx = buffer virtual address, edx = byte count.
+         *   Returns bytes read in eax, or (uint32_t)-1 on error.
+         *   fd 0: line-buffered keyboard input (echoes characters, stops at '\n'). */
         case SYS_READ: {
+            uint32_t fd  = regs->ebx;
+            char    *buf = (char *)(uintptr_t)regs->ecx;
+            uint32_t len = regs->edx;
+
+            if (fd == 0) {
+                /* int 0x80 clears IF; re-enable so keyboard IRQ and timer can fire. */
+                __asm__ volatile ("sti");
+                uint32_t n = 0;
+                while (n < len) {
+                    char c = keyboard_getchar();
+                    if (c == '\b') {
+                        if (n > 0) { n--; terminal_putchar('\b'); terminal_putchar(' '); terminal_putchar('\b'); }
+                        continue;
+                    }
+                    terminal_putchar(c);
+                    buf[n++] = c;
+                    if (c == '\n') break;
+                }
+                regs->eax = n;
+                break;
+            }
+
             task_t *t = task_current();
-            uint32_t fd = regs->ebx;
             if (fd >= TASK_MAX_FDS || !t->fds[fd]) {
                 regs->eax = (uint32_t)-1; break;
             }
-            void *buf = (void *)(uintptr_t)regs->ecx;
-            regs->eax = vfs_read(t->fds[fd], buf, regs->edx);
+            regs->eax = vfs_read(t->fds[fd], buf, len);
             break;
         }
 
@@ -79,6 +103,31 @@ static void syscall_handler(registers_t *regs) {
         case SYS_GETPID:
             regs->eax = task_current()->pid;
             break;
+
+        /* SYS_SBRK (6): grow the user heap by `increment` bytes.
+         *   ebx = increment (signed; only positive growth is supported).
+         *   Returns the old program break in eax, or (uint32_t)-1 on error. */
+        case SYS_SBRK: {
+            task_t  *t   = task_current();
+            int32_t  inc = (int32_t)regs->ebx;
+            uint32_t old = t->brk;
+
+            if (inc <= 0) { regs->eax = old; break; }
+
+            uint32_t new_brk = old + (uint32_t)inc;
+            /* Map any new pages between old and new brk. */
+            uint32_t p = (old + 0xFFFu) & ~0xFFFu; /* first unmapped page */
+            uint32_t flags = VMM_PRESENT | VMM_WRITABLE | VMM_USER;
+            for (; p < new_brk; p += 0x1000u) {
+                uint32_t frame = pmm_alloc_frame();
+                if (!frame) { regs->eax = (uint32_t)-1; goto sbrk_done; }
+                vmm_map_in_pd(t->cr3, p, frame, flags);
+                __asm__ volatile ("invlpg (%0)" :: "r"(p) : "memory");
+            }
+            t->brk = new_brk;
+            regs->eax = old;
+          sbrk_done: break;
+        }
 
         default:
             regs->eax = (uint32_t)-1;

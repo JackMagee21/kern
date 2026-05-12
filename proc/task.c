@@ -83,7 +83,8 @@ task_t *task_exec(const char *name, const void *elf_data, uint32_t elf_size) {
     uint32_t pd = vmm_create_pd();
     if (!pd) return NULL;
 
-    uint32_t entry = elf_load(elf_data, pd);
+    uint32_t brk = 0;
+    uint32_t entry = elf_load(elf_data, pd, &brk);
     if (!entry) { vmm_destroy_pd(pd); return NULL; }
 
     task_t *t = task_alloc(name, elf_task_trampoline, pd);
@@ -91,6 +92,7 @@ task_t *task_exec(const char *name, const void *elf_data, uint32_t elf_size) {
 
     t->user_entry     = entry;
     t->user_stack_top = USER_STACK_TOP;
+    t->brk            = brk;
     return t;
 }
 
@@ -129,6 +131,11 @@ void task_sleep(uint32_t ms) {
     current->sleep_until = timer_get_ticks() + ms;
     current->state       = TASK_SLEEPING;
     task_yield();
+}
+
+void task_wait(task_t *t) {
+    while (t && t->state != TASK_DEAD)
+        task_yield();
 }
 
 __attribute__((noreturn)) void task_exit(void) {

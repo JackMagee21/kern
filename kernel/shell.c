@@ -173,6 +173,7 @@ static void cmd_exec(const char *args) {
     kfree(buf);
     if (!t) { terminal_print("exec: ELF load failed\n"); return; }
     kprintf("Spawned '%s' (PID %u)\n", t->name, t->pid);
+    task_wait(t);
 }
 
 static void cmd_halt(const char *args) {
