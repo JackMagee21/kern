@@ -1,40 +1,44 @@
 
+KERNEL_VMA = 0xC0000000;
 ENTRY(_start)
 
 SECTIONS {
     /*
-     * Start at 1 MiB.
-     * The first megabyte is reserved for BIOS, VGA buffers, etc.
+     * Boot trampoline: VMA = LMA = 0x100000.
+     * GRUB jumps to _start here, before paging is on.
+     * The multiboot header must be in the first 8 KB of the file.
      */
-    . = 1M;
-
-    /* ── Executable code ─────────────────────────────────── */
-    .text BLOCK(4K) : ALIGN(4K) {
-        *(.multiboot)   /* Multiboot header MUST come first */
-        *(.text)
-    }
-
-    /* ── Read-only data (constants, string literals) ─────── */
-    .rodata BLOCK(4K) : ALIGN(4K) {
-        *(.rodata)
-    }
-
-    /* ── Initialised read/write data ─────────────────────── */
-    .data BLOCK(4K) : ALIGN(4K) {
-        *(.data)
+    . = 0x100000;
+    .boot : {
+        *(.multiboot)
+        *(.boot)
     }
 
     /*
-     * ── Uninitialised data (zero-filled at boot) ──────────
-     * The .bss section is NOT stored in the binary; the bootloader
-     * zeroes this region for us based on the size recorded here.
+     * Kernel proper: VMA = 0xC0101000, LMA = 0x101000.
+     * AT() sets the physical load address so GRUB copies each section
+     * to LMA = VMA - KERNEL_VMA.
      */
-    .bss BLOCK(4K) : ALIGN(4K) {
-        *(COMMON)
-        *(.bss)
+    . = KERNEL_VMA + 0x101000;
+
+    .text ALIGN(4096) : AT(ADDR(.text) - KERNEL_VMA) {
+        *(.text*)
     }
 
-    /* First byte after the kernel image — used by the PMM to know what to
-     * reserve, and by kernel_main as the start of the heap region. */
+    .rodata ALIGN(4096) : AT(ADDR(.rodata) - KERNEL_VMA) {
+        *(.rodata*)
+    }
+
+    .data ALIGN(4096) : AT(ADDR(.data) - KERNEL_VMA) {
+        *(.data*)
+    }
+
+    .bss ALIGN(4096) : AT(ADDR(.bss) - KERNEL_VMA) {
+        *(COMMON)
+        *(.bss*)
+    }
+
     _kernel_end = .;
+
+    /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame) }
 }

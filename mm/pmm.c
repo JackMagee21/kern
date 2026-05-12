@@ -1,5 +1,6 @@
 #include "pmm.h"
 #include "multiboot.h"
+#include "vmm.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -75,7 +76,7 @@ void pmm_init(uint32_t mbi_addr, uint32_t kernel_end) {
     uint32_t off = 0;
     while (off < mbi->mmap_length) {
         multiboot_mmap_entry_t *e =
-            (multiboot_mmap_entry_t *)(uintptr_t)(mbi->mmap_addr + off);
+            (multiboot_mmap_entry_t *)(uintptr_t)P2V(mbi->mmap_addr + off);
 
         if (e->type == MULTIBOOT_MMAP_AVAILABLE && e->addr < 0x100000000ULL) {
             uint32_t base = (uint32_t)e->addr;

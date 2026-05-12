@@ -9,6 +9,7 @@
 #include "scheduler.h"
 #include "usermode.h"
 #include "syscall.h"
+#include "vfs.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -79,6 +80,7 @@ static void cmd_help(const char *args) {
     terminal_print("  ps                list all tasks\n");
     terminal_print("  sleep <ms>        sleep for <ms> milliseconds\n");
     terminal_print("  usertest          spawn a ring-3 task via int 0x80\n");
+    terminal_print("  exec <file>       load and run an ELF from the initrd\n");
     terminal_print("  version           kernel version summary\n");
     terminal_print("  halt              stop the CPU\n");
 }
@@ -142,6 +144,25 @@ static void cmd_version(const char *args) {
     terminal_print("  User mode: ring-3 via iret, int 0x80 syscalls (exit, write)\n");
 }
 
+static void cmd_exec(const char *args) {
+    if (!*args) { terminal_print("Usage: exec <filename>\n"); return; }
+
+    vfs_file_t *f = vfs_open(args);
+    if (!f) { kprintf("exec: '%s' not found\n", args); return; }
+
+    uint32_t size = f->size;
+    void *buf = kmalloc(size);
+    if (!buf) { vfs_close(f); terminal_print("exec: out of memory\n"); return; }
+
+    vfs_read(f, buf, size);
+    vfs_close(f);
+
+    task_t *t = task_exec(args, buf, size);
+    kfree(buf);
+    if (!t) { terminal_print("exec: ELF load failed\n"); return; }
+    kprintf("Spawned '%s' (PID %u)\n", t->name, t->pid);
+}
+
 static void cmd_halt(const char *args) {
     (void)args;
     terminal_print("Halting.\n");
@@ -188,6 +209,7 @@ static const command_t commands[] = {
     { "ps",      cmd_ps      },
     { "sleep",   cmd_sleep   },
     { "usertest", cmd_usertest },
+    { "exec",     cmd_exec     },
     { "version", cmd_version },
     { "halt",    cmd_halt    },
 };

@@ -8,6 +8,7 @@
 
 /* Flags in multiboot_info_t.flags */
 #define MULTIBOOT_FLAG_MEM  (1 << 0)   /* mem_lower / mem_upper valid */
+#define MULTIBOOT_FLAG_MODS (1 << 3)   /* mods_count / mods_addr valid */
 #define MULTIBOOT_FLAG_MMAP (1 << 6)   /* mmap_length / mmap_addr valid */
 
 /*
@@ -53,5 +54,13 @@ typedef struct __attribute__((packed)) {
 } multiboot_mmap_entry_t;
 
 #define MULTIBOOT_MMAP_AVAILABLE 1
+
+/* One entry in the modules list (mods_addr points to an array of these). */
+typedef struct __attribute__((packed)) {
+    uint32_t mod_start;   /* physical address of module data */
+    uint32_t mod_end;     /* physical address of module end  */
+    uint32_t cmdline;     /* physical address of command string */
+    uint32_t reserved;
+} multiboot_mod_t;
 
 #endif

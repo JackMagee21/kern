@@ -22,7 +22,18 @@ void kprintf(const char *fmt, ...) {
 
     for (; *fmt; fmt++) {
         if (*fmt != '%') { terminal_putchar(*fmt); continue; }
-        switch (*++fmt) {
+        ++fmt;
+        /* Skip flags */
+        while (*fmt == '-' || *fmt == '+' || *fmt == ' ' || *fmt == '0' || *fmt == '#')
+            ++fmt;
+        /* Skip width */
+        while (*fmt >= '1' && *fmt <= '9') ++fmt;
+        /* Skip precision */
+        if (*fmt == '.') { ++fmt; while (*fmt >= '0' && *fmt <= '9') ++fmt; }
+        /* Skip length modifiers */
+        while (*fmt == 'l' || *fmt == 'h') ++fmt;
+
+        switch (*fmt) {
             case 'c': terminal_putchar((char)va_arg(ap, int)); break;
             case 's': {
                 const char *s = va_arg(ap, const char *);

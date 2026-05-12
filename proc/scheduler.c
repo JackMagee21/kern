@@ -34,7 +34,7 @@ void scheduler_init(void) {
     for (size_t i = 0; i < TASK_NAME_LEN - 1 && n[i]; i++) boot->name[i] = n[i];
 
     boot->pid   = 0;
-    boot->cr3   = vmm_get_cr3();
+    boot->cr3   = vmm_get_phys_pd();
     boot->state = TASK_RUNNING;
     /* boot->esp is zero — it will be written by switch_context on first yield. */
 

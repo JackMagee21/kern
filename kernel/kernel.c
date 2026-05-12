@@ -17,16 +17,15 @@
 #include "scheduler.h"
 #include "serial.h"
 #include "syscall.h"
+#include "vfs.h"
 
-/* Defined by the linker script — first byte after the kernel image. */
-extern uint32_t _kernel_end;
+extern uint32_t _kernel_end;   /* VMA of first byte after the kernel image */
 
-/* 2 MB kernel heap placed immediately after the kernel binary. */
 #define HEAP_SIZE (2u * 1024u * 1024u)
 
-void kernel_main(uint32_t magic, uint32_t mbi_addr) {
+void kernel_main(uint32_t magic, uint32_t mbi_phys) {
     terminal_init();
-    serial_init();  /* mirror all terminal output to COM1 */
+    serial_init();
 
     gdt_init();
     terminal_print("[OK] GDT loaded  (ring-0, ring-3, TSS)\n");
@@ -46,40 +45,60 @@ void kernel_main(uint32_t magic, uint32_t mbi_addr) {
     timer_init(1000);
     terminal_print("[OK] Timer ready  (1 kHz)\n");
 
-    __asm__ volatile ("sti");
-    terminal_print("[OK] Interrupts enabled\n");
-
-    /* Verify Multiboot magic before touching the info structure. */
     if (magic != MULTIBOOT_MAGIC) {
         terminal_print("[ERR] Not loaded by a Multiboot bootloader — halting.\n");
         __asm__ volatile ("cli; hlt");
         __builtin_unreachable();
     }
 
-    /* Physical memory manager. */
-    pmm_init(mbi_addr, (uint32_t)&_kernel_end);
+    /*
+     * Switch from the 4 MB PSE boot mapping to proper 4 KB pages.
+     * Interrupts are kept off until vmm_init() finishes: a timer IRQ
+     * between zeroing PDE[768] and reloading CR3 would triple-fault.
+     */
+    vmm_init();
+    terminal_print("[OK] Paging enabled  (4 KB pages, page 0 guard)\n");
+
+    __asm__ volatile ("sti");
+    terminal_print("[OK] Interrupts enabled\n");
+
+    /*
+     * mbi_phys is the physical address GRUB stored in ebx.
+     * The multiboot info structure lives in low physical memory (< 1 MB),
+     * which is now only accessible via P2V.
+     */
+    multiboot_info_t *mbi = (multiboot_info_t *)(uintptr_t)P2V(mbi_phys);
+    uint32_t kernel_phys_end = V2P((uint32_t)&_kernel_end);
+    pmm_init((uint32_t)mbi, kernel_phys_end);
     kprintf("[OK] PMM ready     — %u MB free (%u frames)\n",
             (uint32_t)((pmm_get_free() * 4) / 1024),
             (uint32_t)pmm_get_free());
 
-    /* Paging: 4 KB identity-mapped pages, page 0 unmapped. */
-    vmm_init();
-    terminal_print("[OK] Paging enabled  (4 KB pages, page 0 guard)\n");
+    /* Heap: 2 MB immediately after the kernel image (virtual address). */
+    uint32_t heap_virt = (uint32_t)&_kernel_end;
+    uint32_t heap_phys = V2P(heap_virt);
+    heap_init(heap_virt, HEAP_SIZE);
+    pmm_reserve(heap_phys, HEAP_SIZE);
+    kprintf("[OK] Heap ready    — %u KB at 0x%x (phys 0x%x)\n",
+            (uint32_t)(HEAP_SIZE / 1024), heap_virt, heap_phys);
 
-    /* Heap: 2 MB region right after the kernel image. */
-    uint32_t heap_start = (uint32_t)&_kernel_end;
-    heap_init(heap_start, HEAP_SIZE);
-    pmm_reserve(heap_start, HEAP_SIZE);
-    kprintf("[OK] Heap ready    — %u KB at 0x%x\n",
-            (uint32_t)(HEAP_SIZE / 1024), heap_start);
-
-    /* Cooperative task scheduler (wraps the boot context as PID 0). */
     scheduler_init();
-    terminal_print("[OK] Scheduler ready\n");
+    terminal_print("[OK] Scheduler ready  (preemptive, 10 ms quantum)\n");
 
-    /* int 0x80 syscall gate (SYS_EXIT=0, SYS_WRITE=1). */
     syscall_init();
     terminal_print("[OK] Syscalls ready  (int 0x80)\n");
 
-    shell_run(); /* does not return */
+    /* Load the initrd from the first GRUB module, if present. */
+    if ((mbi->flags & MULTIBOOT_FLAG_MODS) && mbi->mods_count > 0) {
+        multiboot_mod_t *mods =
+            (multiboot_mod_t *)(uintptr_t)P2V(mbi->mods_addr);
+        uint32_t mod_phys = mods[0].mod_start;
+        uint32_t mod_size = mods[0].mod_end - mod_phys;
+        vfs_init((const void *)(uintptr_t)P2V(mod_phys), mod_size);
+        pmm_reserve(mod_phys, mod_size);
+        kprintf("[OK] Initrd loaded — %u bytes at phys 0x%x\n",
+                mod_size, mod_phys);
+    }
+
+    shell_run();
 }
