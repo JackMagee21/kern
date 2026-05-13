@@ -183,13 +183,16 @@ Shell Commands
 Known Issues / Work in Progress
 --------------------------------
 
-  - TSS ESP0 crash: a forked child that calls sys_sleep() before exiting
-    triggers a kernel panic (page fault, EIP in user-space range, kernel CS).
-    Root cause is under investigation; the fix in task_yield that updates TSS
-    after switch_context is in place but the race path has not been fully
-    eliminated.
+  None known.  Recent fixes:
 
-  - Initial kernel stack frame order in task_alloc() is wrong: eflags and ebx
-    are swapped, so new tasks start with IF=0 instead of IF=1.  Safe in practice
-    because both trampolines (elf_task_trampoline, fork_trampoline) force IF=1
-    before iret, but the frame should be corrected.
+  - TSS ESP0 / fork+sleep crash: root cause was a reentrancy bug in
+    task_yield().  When called with IF=1 (direct path: task_sleep, task_wait)
+    the timer IRQ could fire between "current = next" and switch_context,
+    causing the nested scheduler_tick to read the wrong current and corrupt
+    saved stack pointers.  Fixed by saving IF and issuing CLI at the start of
+    task_yield, then restoring IF (per-task, from the saved value on the kernel
+    stack) after switch_context and tss_set_kernel_stack.
+
+  - Initial kernel stack frame order in task_alloc() was wrong: eflags and ebx
+    were swapped, so new tasks started with IF=0.  Fixed; frame now matches the
+    pop order in switch_context (popf first, ret last).

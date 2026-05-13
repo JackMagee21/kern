@@ -53,9 +53,18 @@ uint32_t vmm_get_phys_pd(void);
  */
 uint32_t vmm_create_pd(void);
 
-/* Free a task's page directory and all user-space (PDE[0-767]) page tables.
- * Kernel-half PDEs are NOT freed (they are shared). */
+/* Free a task's page directory, all user-space page tables, and all mapped
+ * user page frames.  Kernel-half PDEs are NOT freed (they are shared). */
 void vmm_destroy_pd(uint32_t pd_phys);
+
+/*
+ * Deep-copy a page directory for fork().
+ * Kernel half (PDE[768-1023]) is shared (same physical page tables).
+ * User half (PDE[0-767]) is fully cloned: new page tables and new page frames,
+ * with the same content as the source.
+ * Returns the physical address of the new PD, or 0 on allocation failure.
+ */
+uint32_t vmm_clone_pd(uint32_t src_phys);
 
 /*
  * Map one 4 KB page in an ARBITRARY page directory (not the current one).

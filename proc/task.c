@@ -4,10 +4,12 @@
 #include "timer.h"
 #include "elf.h"
 #include "usermode.h"
+#include "tss.h"
 #include <stdint.h>
 #include <stddef.h>
 
 extern void switch_context(uint32_t *old_esp_ptr, uint32_t new_esp);
+extern void fork_enter_user(registers_t *r);
 
 static task_t  *current   = NULL;
 static task_t  *task_list = NULL;
@@ -38,15 +40,17 @@ static task_t *task_alloc(const char *name, void (*fn)(void), uint32_t pd_phys) 
 
     /*
      * Build the initial switch_context frame on the task's kernel stack.
-     * switch_context restores: popf, pop ebp/edi/esi/ebx, ret → fn.
+     * switch_context restores in this order: popf, pop ebp/edi/esi/ebx, ret.
+     * So the stack grows down: fn is at the top, eflags is at the bottom
+     * (lowest address, pointed to by t->esp, popped first by popf).
      */
     uint32_t *sp = (uint32_t *)(t->stack + TASK_STACK_SIZE);
-    *--sp = (uint32_t)fn;   /* return address  */
-    *--sp = 0x200u;          /* eflags: IF=1    */
-    *--sp = 0;               /* ebp             */
-    *--sp = 0;               /* edi             */
-    *--sp = 0;               /* esi             */
-    *--sp = 0;               /* ebx             */
+    *--sp = (uint32_t)fn;   /* return address (popped last, by ret)  */
+    *--sp = 0;               /* ebx                                   */
+    *--sp = 0;               /* esi                                   */
+    *--sp = 0;               /* edi                                   */
+    *--sp = 0;               /* ebp                                   */
+    *--sp = 0x200u;          /* eflags: IF=1 (popped first, by popf) */
     t->esp = (uint32_t)sp;
 
     list_append(t);
@@ -101,6 +105,20 @@ task_t *task_exec(const char *name, const void *elf_data, uint32_t elf_size) {
 void task_yield(void) {
     if (!current) return;
 
+    /*
+     * Save IF and disable interrupts for the entire critical section.
+     * If task_yield is called directly (IF=1) the timer could otherwise fire
+     * after "current = next" but before switch_context, causing scheduler_tick
+     * to read the wrong current and corrupt saved stack pointers.
+     *
+     * The eflags local lives on the calling task's kernel stack.  When
+     * switch_context saves this task's ESP and later restores it, eflags still
+     * holds the pre-CLI value for *this* task, so the conditional sti below
+     * correctly restores IF on a per-task basis.
+     */
+    uint32_t eflags;
+    __asm__ volatile ("pushf; pop %0; cli" : "=r"(eflags));
+
     task_t *next = current->next;
     while (next != current) {
         if (next->state == TASK_READY) break;
@@ -108,6 +126,9 @@ void task_yield(void) {
     }
 
     if (next == current) {
+        /* No ready task — spin on hlt until a sleeping task is woken.
+         * Re-enable interrupts first so the timer IRQ can fire. */
+        __asm__ volatile ("sti");
         while (current->state == TASK_SLEEPING)
             __asm__ volatile ("hlt");
         return;
@@ -119,11 +140,17 @@ void task_yield(void) {
     current      = next;
     current->state = TASK_RUNNING;
 
-    /* Reload CR3 if the new task has a different address space. */
     if (old->cr3 != current->cr3)
         vmm_switch(current->cr3);
 
     switch_context(&old->esp, current->esp);
+
+    /* Now executing as the resumed task. */
+    tss_set_kernel_stack((uint32_t)current->stack + TASK_STACK_SIZE);
+
+    /* Restore IF to whatever it was when this task last entered task_yield. */
+    if (eflags & 0x200)
+        __asm__ volatile ("sti");
 }
 
 void task_sleep(uint32_t ms) {
@@ -138,8 +165,76 @@ void task_wait(task_t *t) {
         task_yield();
 }
 
+int32_t task_waitpid(uint32_t pid) {
+    /* Find the task with the requested pid. */
+    task_t *head = task_list;
+    if (!head) return -1;
+    task_t *t = head;
+    do {
+        if (t->pid == pid) break;
+        t = t->next;
+    } while (t != head);
+    if (t->pid != pid) return -1;
+
+    /* Yield until it dies. */
+    while (t->state != TASK_DEAD)
+        task_yield();
+
+    /* Remove from circular list. */
+    task_t *prev = t;
+    while (prev->next != t) prev = prev->next;
+    if (prev == t) {
+        task_list = NULL;
+    } else {
+        prev->next = t->next;
+        if (task_list == t) task_list = t->next;
+    }
+
+    kfree(t);
+    return (int32_t)pid;
+}
+
+/* ── Fork trampoline ──────────────────────────────────────────────────── */
+
+static void fork_trampoline(void) {
+    task_t *t = task_current();
+    tss_set_kernel_stack((uint32_t)t->stack + TASK_STACK_SIZE);
+    vmm_switch(t->cr3);
+    fork_enter_user(&t->fork_regs);
+    __builtin_unreachable();
+}
+
+task_t *task_fork(registers_t *regs) {
+    task_t *parent = task_current();
+
+    uint32_t child_pd = vmm_clone_pd(parent->cr3);
+    if (!child_pd) return NULL;
+
+    task_t *child = task_alloc(parent->name, fork_trampoline, child_pd);
+    if (!child) { vmm_destroy_pd(child_pd); return NULL; }
+
+    child->fork_regs     = *regs;
+    child->fork_regs.eax = 0;          /* fork() returns 0 in the child */
+    child->brk           = parent->brk;
+    child->user_entry    = parent->user_entry;
+    child->user_stack_top = parent->user_stack_top;
+    for (size_t i = 0; i < TASK_MAX_FDS; i++)
+        child->fds[i] = parent->fds[i];
+
+    return child;
+}
+
 __attribute__((noreturn)) void task_exit(void) {
-    if (current) current->state = TASK_DEAD;
+    if (current) {
+        /* Switch to kernel PD so we can safely free the user address space. */
+        uint32_t kpd = vmm_get_phys_pd();
+        if (current->cr3 != kpd) {
+            vmm_switch(kpd);
+            vmm_destroy_pd(current->cr3);
+            current->cr3 = kpd;
+        }
+        current->state = TASK_DEAD;
+    }
     task_yield();
     for (;;) __asm__ volatile ("hlt");
     __builtin_unreachable();

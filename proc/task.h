@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "idt.h"
 
 #define TASK_STACK_SIZE  8192u
 #define TASK_NAME_LEN    16u
@@ -32,6 +33,8 @@ typedef struct task {
     /* Open file descriptor table. */
     struct vfs_file *fds[TASK_MAX_FDS];
     struct task    *next;
+    /* Saved user-mode register state for fork trampoline. */
+    registers_t     fork_regs;
     uint8_t         stack[TASK_STACK_SIZE] __attribute__((aligned(16)));
 } task_t;
 
@@ -57,7 +60,17 @@ task_t *task_exec(const char *name, const void *elf_data, uint32_t elf_size);
 
 void  task_yield(void);
 void  task_sleep(uint32_t ms);
-void  task_wait(task_t *t);   /* block until t reaches TASK_DEAD */
+void  task_wait(task_t *t);         /* block until t reaches TASK_DEAD */
+int32_t task_waitpid(uint32_t pid); /* block until pid dies; frees it; returns pid or -1 */
+
+/*
+ * Clone the current user task for fork().
+ * Copies the page directory (vmm_clone_pd), duplicates the task_t, sets up
+ * the child to resume at the fork point with eax=0.
+ * Returns the child task_t, or NULL on failure.
+ */
+task_t *task_fork(registers_t *regs);
+
 __attribute__((noreturn)) void task_exit(void);
 
 #endif

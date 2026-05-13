@@ -6,6 +6,9 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "keyboard.h"
+#include "heap.h"
+#include "elf.h"
+#include "usermode.h"
 #include <stdint.h>
 
 static void syscall_handler(registers_t *regs) {
@@ -128,6 +131,73 @@ static void syscall_handler(registers_t *regs) {
             regs->eax = old;
           sbrk_done: break;
         }
+
+        /* SYS_FORK (7): clone the calling task.
+         *   Returns child PID in parent, 0 in child, or (uint32_t)-1 on error. */
+        case SYS_FORK: {
+            task_t *child = task_fork(regs);
+            regs->eax = child ? child->pid : (uint32_t)-1;
+            break;
+        }
+
+        /* SYS_WAITPID (8): wait for a child process to exit.
+         *   ebx = pid.  Returns pid on success, (uint32_t)-1 if not found. */
+        case SYS_WAITPID: {
+            int32_t r = task_waitpid((uint32_t)regs->ebx);
+            regs->eax = (uint32_t)r;
+            break;
+        }
+
+        /* SYS_EXEC (9): replace this task's image with a new ELF from the initrd.
+         *   ebx = virtual address of null-terminated path string.
+         *   Does not return on success (IRET's to new entry); returns -1 on error. */
+        case SYS_EXEC: {
+            const char *path = (const char *)(uintptr_t)regs->ebx;
+
+            vfs_file_t *f = vfs_open(path);
+            if (!f) { regs->eax = (uint32_t)-1; break; }
+
+            uint32_t size = f->size;
+            void *buf = kmalloc(size);
+            if (!buf) { vfs_close(f); regs->eax = (uint32_t)-1; break; }
+            vfs_read(f, buf, size);
+            vfs_close(f);
+
+            uint32_t new_pd = vmm_create_pd();
+            if (!new_pd) { kfree(buf); regs->eax = (uint32_t)-1; break; }
+
+            uint32_t brk = 0;
+            uint32_t entry = elf_load(buf, new_pd, &brk);
+            kfree(buf);
+            if (!entry) { vmm_destroy_pd(new_pd); regs->eax = (uint32_t)-1; break; }
+
+            task_t *t = task_current();
+            uint32_t old_pd = t->cr3;
+
+            /* Switch to new address space and free the old one. */
+            t->cr3 = new_pd;
+            vmm_switch(new_pd);
+            vmm_destroy_pd(old_pd);
+
+            t->brk            = brk;
+            t->user_entry     = entry;
+            t->user_stack_top = USER_STACK_TOP;
+
+            /* Close FDs (exec traditionally inherits non-CLOEXEC fds;
+             * we reset them all for simplicity). */
+            for (uint32_t i = 0; i < TASK_MAX_FDS; i++) {
+                if (t->fds[i]) { vfs_close(t->fds[i]); t->fds[i] = NULL; }
+            }
+
+            enter_usermode((void (*)(void))entry, USER_STACK_TOP);
+            __builtin_unreachable();
+        }
+
+        /* SYS_SLEEP (10): sleep for ebx milliseconds. */
+        case SYS_SLEEP:
+            task_sleep((uint32_t)regs->ebx);
+            regs->eax = 0;
+            break;
 
         default:
             regs->eax = (uint32_t)-1;

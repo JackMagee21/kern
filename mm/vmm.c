@@ -113,12 +113,56 @@ uint32_t vmm_create_pd(void) {
 void vmm_destroy_pd(uint32_t pd_phys) {
     uint32_t *pd = (uint32_t *)(uintptr_t)P2V(pd_phys);
 
-    /* Free all user-space page tables (kernel half is shared, not freed). */
     for (int i = 0; i < 768; i++) {
-        if (pd[i] & VMM_PRESENT)
-            pmm_free_frame(pd[i] & ~0xFFFu);
+        if (!(pd[i] & VMM_PRESENT)) continue;
+        uint32_t *pt = (uint32_t *)(uintptr_t)P2V(pd[i] & ~0xFFFu);
+        /* Free every mapped page frame in this table. */
+        for (int j = 0; j < 1024; j++) {
+            if (pt[j] & VMM_PRESENT)
+                pmm_free_frame(pt[j] & ~0xFFFu);
+        }
+        pmm_free_frame(pd[i] & ~0xFFFu); /* free the page table itself */
     }
     pmm_free_frame(pd_phys);
+}
+
+uint32_t vmm_clone_pd(uint32_t src_phys) {
+    uint32_t dst_phys = pmm_alloc_frame();
+    if (!dst_phys) return 0;
+
+    uint32_t *src = (uint32_t *)(uintptr_t)P2V(src_phys);
+    uint32_t *dst = (uint32_t *)(uintptr_t)P2V(dst_phys);
+
+    /* Kernel half: share the same physical page tables. */
+    for (int i = 768; i < 1024; i++) dst[i] = src[i];
+
+    /* User half: deep copy — new page tables and new page frames. */
+    for (int i = 0; i < 768; i++) {
+        if (!(src[i] & VMM_PRESENT)) { dst[i] = 0; continue; }
+
+        uint32_t new_pt_phys = pmm_alloc_frame();
+        if (!new_pt_phys) { vmm_destroy_pd(dst_phys); return 0; }
+
+        uint32_t *src_pt = (uint32_t *)(uintptr_t)P2V(src[i] & ~0xFFFu);
+        uint32_t *dst_pt = (uint32_t *)(uintptr_t)P2V(new_pt_phys);
+
+        for (int j = 0; j < 1024; j++) {
+            if (!(src_pt[j] & VMM_PRESENT)) { dst_pt[j] = 0; continue; }
+
+            uint32_t new_frame = pmm_alloc_frame();
+            if (!new_frame) {
+                pmm_free_frame(new_pt_phys);
+                vmm_destroy_pd(dst_phys);
+                return 0;
+            }
+            uint8_t *sp = (uint8_t *)(uintptr_t)P2V(src_pt[j] & ~0xFFFu);
+            uint8_t *dp = (uint8_t *)(uintptr_t)P2V(new_frame);
+            for (int k = 0; k < 4096; k++) dp[k] = sp[k];
+            dst_pt[j] = new_frame | (src_pt[j] & 0xFFFu);
+        }
+        dst[i] = new_pt_phys | (src[i] & 0xFFFu);
+    }
+    return dst_phys;
 }
 
 void vmm_map_in_pd(uint32_t pd_phys, uint32_t virt, uint32_t phys, uint32_t flags) {

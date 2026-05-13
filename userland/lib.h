@@ -15,13 +15,17 @@ typedef signed   int   int32_t;
 typedef unsigned int   size_t;
 
 /* ── Syscall numbers ────────────────────────────────────────────────────── */
-#define SYS_EXIT   0
-#define SYS_WRITE  1
-#define SYS_OPEN   2
-#define SYS_READ   3
-#define SYS_CLOSE  4
-#define SYS_GETPID 5
-#define SYS_SBRK   6
+#define SYS_EXIT    0
+#define SYS_WRITE   1
+#define SYS_OPEN    2
+#define SYS_READ    3
+#define SYS_CLOSE   4
+#define SYS_GETPID  5
+#define SYS_SBRK    6
+#define SYS_FORK    7
+#define SYS_WAITPID 8
+#define SYS_EXEC    9
+#define SYS_SLEEP   10
 
 /* ── Raw syscall wrappers ───────────────────────────────────────────────── */
 
@@ -65,6 +69,30 @@ static inline void *sys_sbrk(int increment) {
     __asm__ volatile ("int $0x80"
         : "=a"(ret) : "0"(SYS_SBRK), "b"(increment) : "memory");
     return ret;
+}
+
+static inline int sys_fork(void) {
+    int ret;
+    __asm__ volatile ("int $0x80" : "=a"(ret) : "0"(SYS_FORK) : "memory");
+    return ret;
+}
+
+static inline int sys_waitpid(unsigned pid) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_WAITPID), "b"(pid) : "memory");
+    return ret;
+}
+
+static inline int sys_exec(const char *path) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_EXEC), "b"(path) : "memory");
+    return ret;
+}
+
+static inline void sys_sleep(unsigned ms) {
+    __asm__ volatile ("int $0x80" :: "a"(SYS_SLEEP), "b"(ms) : "memory");
 }
 
 /* ── Strings ────────────────────────────────────────────────────────────── */

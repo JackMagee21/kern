@@ -1,29 +1,37 @@
 #include "lib.h"
 
 void _start(void) {
-    printf("Hello from user space!\n");
-    printf("My PID is: %u\n", sys_getpid());
+    printf("=== fork/waitpid test ===\n");
+    printf("Parent PID: %u\n", sys_getpid());
 
-    /* Test malloc/free */
-    char *buf = (char *)malloc(64);
-    if (buf) {
-        strcpy(buf, "malloc works!");
-        printf("heap: %s\n", buf);
-        free(buf);
-    } else {
-        puts("malloc failed");
+    int child = sys_fork();
+    if (child < 0) {
+        puts("fork() failed");
+        sys_exit();
     }
 
-    /* Test stdin — ask for name and echo it back */
-    puts("Enter your name: ");
-    char line[64];
-    int n = getline(line, sizeof(line));
-    if (n > 0)
-        printf("Hello, %s!\n", line);
-    else
-        puts("(no input)");
+    if (child == 0) {
+        /* Child */
+        printf("Child PID:  %u  (fork returned %d)\n", sys_getpid(), child);
+        sys_sleep(50);
+        puts("Child: done sleeping, exiting.");
+        sys_exit();
+    }
 
-    puts("Exiting.");
+    /* Parent */
+    printf("Parent: child PID is %d, waiting...\n", child);
+    sys_waitpid((unsigned)child);
+    puts("Parent: child has exited.");
+
+    /* Test malloc in parent (sbrk / heap) */
+    char *buf = (char *)malloc(128);
+    if (buf) {
+        strcpy(buf, "heap ok");
+        printf("Parent: %s\n", buf);
+        free(buf);
+    }
+
+    puts("Parent: exiting.");
     sys_exit();
     for (;;) __asm__ volatile ("hlt");
 }
