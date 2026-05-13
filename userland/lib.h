@@ -26,6 +26,9 @@ typedef unsigned int   size_t;
 #define SYS_WAITPID 8
 #define SYS_EXEC    9
 #define SYS_SLEEP   10
+#define SYS_PIPE    11
+#define SYS_DUP2    12
+#define SYS_GETDENT 13
 
 /* ── Raw syscall wrappers ───────────────────────────────────────────────── */
 
@@ -84,10 +87,35 @@ static inline int sys_waitpid(unsigned pid) {
     return ret;
 }
 
-static inline int sys_exec(const char *path) {
+/* exec(path, cmdline): replace current image.
+ * cmdline is the full space-separated argument string (e.g. "echo hi").
+ * Pass NULL for cmdline to use path as argv[0] only. */
+static inline int sys_exec(const char *path, const char *cmdline) {
     int ret;
     __asm__ volatile ("int $0x80"
-        : "=a"(ret) : "0"(SYS_EXEC), "b"(path) : "memory");
+        : "=a"(ret) : "0"(SYS_EXEC), "b"(path), "c"(cmdline) : "memory");
+    return ret;
+}
+
+static inline int sys_pipe(int fds[2]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_PIPE), "b"(fds) : "memory");
+    return ret;
+}
+
+static inline int sys_dup2(int old_fd, int new_fd) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_DUP2), "b"(old_fd), "c"(new_fd) : "memory");
+    return ret;
+}
+
+/* Returns length of name written, 0 if idx is out of range. */
+static inline int sys_getdent(unsigned idx, char *buf, unsigned bufsz) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_GETDENT), "b"(idx), "c"(buf), "d"(bufsz) : "memory");
     return ret;
 }
 
@@ -104,6 +132,19 @@ static inline size_t strlen(const char *s) {
 static inline int strcmp(const char *a, const char *b) {
     while (*a && *a == *b) { a++; b++; }
     return (unsigned char)*a - (unsigned char)*b;
+}
+
+static inline int strncmp(const char *a, const char *b, size_t n) {
+    while (n-- && *a && *a == *b) { a++; b++; }
+    if (!n) return 0;
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+static inline char *strncpy(char *dst, const char *src, size_t n) {
+    size_t i = 0;
+    while (i < n && src[i]) { dst[i] = src[i]; i++; }
+    while (i < n) dst[i++] = '\0';
+    return dst;
 }
 
 static inline char *strcpy(char *dst, const char *src) {

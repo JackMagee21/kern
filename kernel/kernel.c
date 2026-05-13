@@ -17,6 +17,7 @@
 #include "scheduler.h"
 #include "serial.h"
 #include "syscall.h"
+#include "task.h"
 #include "vfs.h"
 
 extern uint32_t _kernel_end;   /* VMA of first byte after the kernel image */
@@ -111,6 +112,31 @@ void kernel_main(uint32_t magic, uint32_t mbi_phys) {
 
     syscall_init();
     terminal_print("[OK] Syscalls ready  (int 0x80)\n");
+
+    /*
+     * Try to launch the userland shell ("sh") from the initrd.
+     * If it exists, run it and wait; fall back to the kernel shell on exit.
+     */
+    {
+        vfs_file_t *f = vfs_open("sh");
+        if (f) {
+            uint32_t sz  = f->size;
+            void    *buf = kmalloc(sz);
+            if (buf) {
+                vfs_read(f, buf, sz);
+                vfs_close(f);
+                task_t *sh = task_exec("sh", buf, sz);
+                kfree(buf);
+                if (sh) {
+                    terminal_print("[OK] Launching userland shell (sh)\n");
+                    task_wait(sh);
+                    terminal_print("\nUserland shell exited — dropping to kernel shell.\n");
+                }
+            } else {
+                vfs_close(f);
+            }
+        }
+    }
 
     shell_run();
 }

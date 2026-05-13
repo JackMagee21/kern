@@ -186,3 +186,15 @@ void vmm_map_in_pd(uint32_t pd_phys, uint32_t virt, uint32_t phys, uint32_t flag
 void vmm_switch(uint32_t pd_phys) {
     __asm__ volatile ("mov %0, %%cr3" :: "r"(pd_phys) : "memory");
 }
+
+uint32_t vmm_virt_to_phys(uint32_t pd_phys, uint32_t virt) {
+    uint32_t *pd  = (uint32_t *)(uintptr_t)P2V(pd_phys);
+    uint32_t  pdi = virt >> 22;
+    if (!(pd[pdi] & VMM_PRESENT)) return 0;
+
+    uint32_t *pt  = pde_to_pt(pd[pdi]);
+    uint32_t  pti = (virt >> 12) & 0x3FFu;
+    if (!(pt[pti] & VMM_PRESENT)) return 0;
+
+    return (pt[pti] & ~0xFFFu) | (virt & 0xFFFu);
+}

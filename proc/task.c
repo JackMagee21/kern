@@ -1,4 +1,6 @@
 #include "task.h"
+#include "pipe.h"
+#include "vfs.h"
 #include "heap.h"
 #include "vmm.h"
 #include "timer.h"
@@ -7,6 +9,34 @@
 #include "tss.h"
 #include <stdint.h>
 #include <stddef.h>
+
+/* ── fd helpers ───────────────────────────────────────────────────────────── */
+
+fd_t task_fd_dup(fd_t src) {
+    switch (src.type) {
+        case FD_FILE: {
+            /* Give the child its own vfs_file_t so positions are independent. */
+            vfs_file_t *f2 = (vfs_file_t *)kmalloc(sizeof(vfs_file_t));
+            if (f2) *f2 = *src.file;
+            fd_t d; d.type = FD_FILE; d.file = f2;
+            return d;
+        }
+        case FD_PIPE_R: src.pipe->readers++; return src;
+        case FD_PIPE_W: src.pipe->writers++; return src;
+        default:        return src; /* FD_NONE */
+    }
+}
+
+void task_fd_close(fd_t *fd) {
+    switch (fd->type) {
+        case FD_FILE:   vfs_close(fd->file);          break;
+        case FD_PIPE_R: pipe_close_reader(fd->pipe);  break;
+        case FD_PIPE_W: pipe_close_writer(fd->pipe);  break;
+        default: break;
+    }
+    fd->type = FD_NONE;
+    fd->pipe = (void *)0;
+}
 
 extern void switch_context(uint32_t *old_esp_ptr, uint32_t new_esp);
 extern void fork_enter_user(registers_t *r);
@@ -95,7 +125,7 @@ task_t *task_exec(const char *name, const void *elf_data, uint32_t elf_size) {
     if (!t) { vmm_destroy_pd(pd); return NULL; }
 
     t->user_entry     = entry;
-    t->user_stack_top = USER_STACK_TOP;
+    t->user_stack_top = elf_setup_argv(pd, name); /* argv[0] = program name */
     t->brk            = brk;
     return t;
 }
@@ -219,13 +249,17 @@ task_t *task_fork(registers_t *regs) {
     child->user_entry    = parent->user_entry;
     child->user_stack_top = parent->user_stack_top;
     for (size_t i = 0; i < TASK_MAX_FDS; i++)
-        child->fds[i] = parent->fds[i];
+        child->fds[i] = task_fd_dup(parent->fds[i]);
 
     return child;
 }
 
 __attribute__((noreturn)) void task_exit(void) {
     if (current) {
+        /* Close all open file descriptors (decrements pipe refcounts etc.). */
+        for (size_t i = 0; i < TASK_MAX_FDS; i++)
+            task_fd_close(&current->fds[i]);
+
         /* Switch to kernel PD so we can safely free the user address space. */
         uint32_t kpd = vmm_get_phys_pd();
         if (current->cr3 != kpd) {

@@ -5,6 +5,37 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* ── argv setup helpers ────────────────────────────────────────────────── */
+
+static void user_write_byte(uint32_t pd_phys, uint32_t virt, uint8_t v) {
+    uint32_t phys = vmm_virt_to_phys(pd_phys, virt);
+    if (phys) *((uint8_t *)(uintptr_t)P2V(phys)) = v;
+}
+
+static void user_write_u32(uint32_t pd_phys, uint32_t virt, uint32_t v) {
+    for (int i = 0; i < 4; i++)
+        user_write_byte(pd_phys, virt + (uint32_t)i, (uint8_t)(v >> (8 * i)));
+}
+
+static size_t kstrlen(const char *s) { size_t n = 0; while (*s++) n++; return n; }
+
+/* Split src on spaces into tokens[]; returns token count (max MAX_ARGC). */
+#define MAX_ARGC 16
+#define MAX_TOKLEN 128
+static int split_args(const char *src, char tokens[][MAX_TOKLEN]) {
+    int n = 0;
+    while (*src && n < MAX_ARGC) {
+        while (*src == ' ') src++;
+        if (!*src) break;
+        int i = 0;
+        while (*src && *src != ' ' && i < MAX_TOKLEN - 1)
+            tokens[n][i++] = *src++;
+        tokens[n][i] = '\0';
+        n++;
+    }
+    return n;
+}
+
 /* ── Private helpers ───────────────────────────────────────────────────── */
 
 static void kfill(void *dst, int c, size_t n) {
@@ -86,4 +117,67 @@ uint32_t elf_load(const void *elf_data, uint32_t pd_phys, uint32_t *out_brk) {
 
     if (out_brk) *out_brk = brk;
     return hdr->e_entry;
+}
+
+/*
+ * Build a cdecl-compatible argc/argv frame on the user stack.
+ *
+ * Stack layout written (addresses decrease downward, sp grows down):
+ *   [strings packed at top of stack, null-terminated]
+ *   NULL ptr          (argv sentinel)
+ *   argv[argc-1] ptr
+ *   ...
+ *   argv[0] ptr       <- argv base
+ *   argc              (uint32_t)
+ *   0                 (fake return address so cdecl _start works)
+ *   <-- returned ESP
+ *
+ * cdecl _start(int argc, char **argv):
+ *   [esp+0] = fake ret = 0
+ *   [esp+4] = argc
+ *   [esp+8] = argv (pointer to argv[0])
+ */
+uint32_t elf_setup_argv(uint32_t pd_phys, const char *cmdline) {
+    char tokens[MAX_ARGC][MAX_TOKLEN];
+    int  argc = split_args(cmdline ? cmdline : "", tokens);
+    if (argc == 0) {
+        /* No args: just push a zero-argc frame. */
+        uint32_t sp = USER_STACK_TOP;
+        sp -= 4; user_write_u32(pd_phys, sp, 0); /* argv = NULL */
+        sp -= 4; user_write_u32(pd_phys, sp, sp + 4); /* argv ptr (points to NULL) */
+        sp -= 4; user_write_u32(pd_phys, sp, 0); /* argc = 0 */
+        sp -= 4; user_write_u32(pd_phys, sp, 0); /* fake ret */
+        return sp;
+    }
+
+    uint32_t sp = USER_STACK_TOP;
+
+    /* Push strings from the last arg to the first (top of stack). */
+    uint32_t str_ptrs[MAX_ARGC];
+    for (int i = argc - 1; i >= 0; i--) {
+        size_t len = kstrlen(tokens[i]) + 1; /* include NUL */
+        sp -= (uint32_t)len;
+        sp &= ~3u; /* 4-byte align each string */
+        for (size_t j = 0; j < len; j++)
+            user_write_byte(pd_phys, sp + (uint32_t)j, (uint8_t)tokens[i][j]);
+        str_ptrs[i] = sp;
+    }
+
+    sp &= ~3u; /* align before pointer array */
+
+    /* Push NULL sentinel then argv pointers in reverse. */
+    sp -= 4; user_write_u32(pd_phys, sp, 0); /* argv[argc] = NULL */
+    for (int i = argc - 1; i >= 0; i--) {
+        sp -= 4;
+        user_write_u32(pd_phys, sp, str_ptrs[i]);
+    }
+
+    uint32_t argv_base = sp;
+
+    /* Push argc and fake return address. */
+    sp -= 4; user_write_u32(pd_phys, sp, argv_base);   /* argv */
+    sp -= 4; user_write_u32(pd_phys, sp, (uint32_t)argc); /* argc */
+    sp -= 4; user_write_u32(pd_phys, sp, 0);           /* fake ret */
+
+    return sp;
 }

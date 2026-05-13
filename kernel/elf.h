@@ -19,4 +19,19 @@
  */
 uint32_t elf_load(const void *elf_data, uint32_t pd_phys, uint32_t *out_brk);
 
+/*
+ * Build an argc/argv frame on the user stack of an already-loaded task.
+ *
+ * cmdline : space-separated argument string (e.g. "echo hello world").
+ *           The first token becomes argv[0] and the program name.
+ * pd_phys : physical address of the task's page directory.
+ *
+ * Writes the strings and argv[] pointer array onto the user stack pages via
+ * vmm_virt_to_phys so no PD switch is required.
+ *
+ * Returns the initial user ESP the task should start with (points to the
+ * fake return address / argc / argv layout expected by cdecl _start).
+ */
+uint32_t elf_setup_argv(uint32_t pd_phys, const char *cmdline);
+
 #endif

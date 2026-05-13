@@ -146,25 +146,58 @@ Syscalls  [proc/syscall.c]
   int 0x80, eax = syscall number, ebx/ecx/edx = arguments, return in eax.
 
     0  exit      terminate calling task
-    1  write     write bytes to a file descriptor (fd 1 = VGA stdout)
+    1  write     write bytes to fd (fd 1 = VGA stdout; pipe write ends also work)
     2  open      open a file from the initrd by name
-    3  read      read from fd (fd 0 = line-buffered keyboard)
+    3  read      read from fd (fd 0 = keyboard; pipe read ends block until data)
     4  close     close a file descriptor
     5  getpid    return the calling task's PID
     6  sbrk      grow user heap by N bytes; returns old program break
     7  fork      clone task (deep-copy address space); returns 0 in child
     8  waitpid   wait for a child PID to exit
-    9  exec      replace current image with an ELF from the initrd
+    9  exec      ebx=path, ecx=cmdline — replace image; sets up argc/argv
    10  sleep     sleep for N milliseconds
+   11  pipe      ebx=int[2] out-ptr; fills [0]=read fd, [1]=write fd
+   12  dup2      ebx=old_fd, ecx=new_fd — duplicate fd (used for redirections)
+   13  getdent   ebx=index, ecx=buf, edx=bufsz — return nth initrd filename
 
 Userland  [userland/]
-  Tiny freestanding libc (lib.h): syscall wrappers, printf, puts, strlen, strcpy,
-  memset, memcpy, malloc/free/realloc (sbrk-based bump + free-list).
-  Compiled with -ffreestanding -nostdlib and linked at virtual address 0x400000.
+  Tiny freestanding libc (lib.h): syscall wrappers, printf, puts, strlen,
+  strcmp, strncmp, strncpy, memset, memcpy, malloc/free/realloc.
+  Compiled with -ffreestanding -nostdlib, linked at 0x400000.
+
+  Programs packed into the initrd:
+    sh      Userland shell: reads commands, fork+exec's programs, waitpid.
+            Supports pipelines (cmd1 | cmd2 | ...).  Launched automatically.
+    echo    Prints argv[1..] separated by spaces.
+    cat     Reads files (or stdin) and writes to stdout.
+    ls      Lists initrd files via SYS_GETDENT.
+    wc      Counts lines, words, and characters from stdin or files.
+    grep    Prints lines containing a literal pattern (from stdin or files).
+    test    fork/waitpid/sleep/malloc smoke test.
+
+  argc/argv: elf_setup_argv() writes the argument frame onto the user stack
+  via vmm_virt_to_phys before the task starts; _start receives (argc, argv)
+  in standard cdecl form.
 
 
-Shell Commands
---------------
+Userland Shell (sh)
+-------------------
+
+  The userland shell launches automatically.  Type any initrd filename to run
+  it.  Built-ins: help, exit.  Pipelines with | are supported.
+
+  Examples:
+    $ ls
+    $ echo hello world
+    $ cat test
+    $ test
+    $ ls | wc
+    $ ls | grep sh
+
+Kernel Shell (fallback)
+-----------------------
+
+  Reached when the userland shell exits.  Commands:
 
   help              List available commands
   clear             Clear the screen

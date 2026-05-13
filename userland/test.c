@@ -1,6 +1,7 @@
 #include "lib.h"
 
-void _start(void) {
+void _start(int argc, char **argv) {
+    (void)argc; (void)argv;
     printf("=== fork/waitpid test ===\n");
     printf("Parent PID: %u\n", sys_getpid());
 

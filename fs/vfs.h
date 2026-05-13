@@ -35,4 +35,10 @@ void vfs_close(vfs_file_t *f);
 typedef void (*vfs_list_cb_t)(const char *name, uint32_t size, void *ud);
 void vfs_list(vfs_list_cb_t cb, void *ud);
 
+/*
+ * Return the filename of the idx-th entry (0-based), or NULL if out of range.
+ * Used by SYS_GETDENT so userland can iterate the initrd without a callback.
+ */
+const char *vfs_getent(uint32_t idx);
+
 #endif

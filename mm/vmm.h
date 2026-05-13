@@ -76,4 +76,10 @@ void vmm_map_in_pd(uint32_t pd_phys, uint32_t virt, uint32_t phys, uint32_t flag
 /* Load a page directory by writing its physical address to CR3. */
 void vmm_switch(uint32_t pd_phys);
 
+/*
+ * Translate a virtual address in an arbitrary PD to a physical address.
+ * Returns 0 if the address is not mapped.  Handles both user and kernel PDEs.
+ */
+uint32_t vmm_virt_to_phys(uint32_t pd_phys, uint32_t virt);
+
 #endif

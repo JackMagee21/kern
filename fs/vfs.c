@@ -62,6 +62,23 @@ void vfs_close(vfs_file_t *f) {
     kfree(f);
 }
 
+const char *vfs_getent(uint32_t idx) {
+    if (!initrd_base) return NULL;
+    const initrd_header_t *hdr = (const initrd_header_t *)initrd_base;
+    const uint8_t *p   = initrd_base + sizeof(initrd_header_t);
+    const uint8_t *end = initrd_base + initrd_size;
+
+    for (uint32_t i = 0; i < hdr->count; i++) {
+        if (p + sizeof(initrd_entry_t) > end) break;
+        const initrd_entry_t *e = (const initrd_entry_t *)p;
+        const uint8_t *data = p + sizeof(initrd_entry_t);
+        if (data + e->size > end) break;
+        if (i == idx) return e->name;
+        p = data + e->size;
+    }
+    return NULL;
+}
+
 void vfs_list(vfs_list_cb_t cb, void *ud) {
     if (!initrd_base || !cb) return;
 

@@ -3,7 +3,8 @@ AS      := i686-elf-gcc
 LD      := i686-elf-ld
 
 CFLAGS  := -ffreestanding -nostdlib -O2 -Wall -Wextra -std=gnu99 -m32 \
-           -Idrivers -Icpu -Ikernel -Imm -Ilib -Iproc -Ifs
+           -Idrivers -Icpu -Ikernel -Imm -Ilib -Iproc -Ifs \
+           -MMD -MP
 ASFLAGS := -ffreestanding -nostdlib -m32
 
 BUILD   := build
@@ -12,9 +13,16 @@ KERNEL  := kern.bin
 ISO     := kern.iso
 
 INITRD      := initrd.img
-ULAND_ELF   := userland/test.elf
 ULAND_LD    := userland/user.ld
-UCFLAGS     := -ffreestanding -nostdlib -O2 -std=gnu99 -m32
+UCFLAGS     := -ffreestanding -nostdlib -O2 -std=gnu99 -m32 -Wno-builtin-declaration-mismatch
+
+ULAND_ELFS  := userland/sh.elf   \
+               userland/echo.elf \
+               userland/cat.elf  \
+               userland/ls.elf   \
+               userland/wc.elf   \
+               userland/grep.elf \
+               userland/test.elf
 
 # ── Kernel sources ──────────────────────────────────────────────────────
 C_SRCS  := $(shell find . -name '*.c' \
@@ -45,13 +53,20 @@ $(BUILD)/%.o: ./%.c
 $(KERNEL): $(OBJS) linker.ld
 	$(LD) -T linker.ld -o $@ $(OBJS)
 
-# ── User-land ELF ───────────────────────────────────────────────────────
-$(ULAND_ELF): userland/test.c $(ULAND_LD)
-	$(CC) $(UCFLAGS) -T$(ULAND_LD) -o $@ userland/test.c
+# ── User-land ELFs ──────────────────────────────────────────────────────
+userland/%.elf: userland/%.c $(ULAND_LD)
+	$(CC) $(UCFLAGS) -T$(ULAND_LD) -o $@ $<
 
 # ── Initrd image ────────────────────────────────────────────────────────
-$(INITRD): $(ULAND_ELF) tools/mkinitrd.py
-	python3 tools/mkinitrd.py $@ $(ULAND_ELF):test
+$(INITRD): $(ULAND_ELFS) tools/mkinitrd.py
+	python3 tools/mkinitrd.py $@   \
+	    userland/sh.elf:sh         \
+	    userland/echo.elf:echo     \
+	    userland/cat.elf:cat       \
+	    userland/ls.elf:ls         \
+	    userland/wc.elf:wc         \
+	    userland/grep.elf:grep     \
+	    userland/test.elf:test
 
 # ── ISO image ───────────────────────────────────────────────────────────
 $(ISO): $(KERNEL) $(INITRD) grub.cfg
@@ -75,6 +90,9 @@ run-debug: $(ISO)
 # ── Clean ───────────────────────────────────────────────────────────────
 clean:
 	rm -rf $(BUILD) $(KERNEL) $(ISO) $(ISO_DIR)/ qemu-debug.log \
-	       $(INITRD) $(ULAND_ELF)
+	       $(INITRD) $(ULAND_ELFS)
+
+# ── Auto-generated header dependencies ─────────────────────────────────────
+-include $(C_OBJS:.o=.d)
 
 .PHONY: all run run-headless run-debug clean

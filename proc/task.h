@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "idt.h"
+#include "fd.h"
 
 #define TASK_STACK_SIZE  8192u
 #define TASK_NAME_LEN    16u
@@ -16,9 +17,6 @@ typedef enum {
     TASK_DEAD     = 3,
 } task_state_t;
 
-/* Forward-declare vfs_file_t to avoid including vfs.h here. */
-struct vfs_file;
-
 typedef struct task {
     uint32_t        esp;
     uint32_t        cr3;            /* physical address of page directory   */
@@ -28,10 +26,10 @@ typedef struct task {
     char            name[TASK_NAME_LEN];
     /* User-mode fields — set by task_exec, used by elf_task_trampoline. */
     uint32_t        user_entry;     /* ELF entry point (user virtual)       */
-    uint32_t        user_stack_top; /* initial user stack pointer           */
+    uint32_t        user_stack_top; /* initial user ESP (after argv setup)  */
     uint32_t        brk;            /* program break (end of user heap)     */
-    /* Open file descriptor table. */
-    struct vfs_file *fds[TASK_MAX_FDS];
+    /* Open file descriptor table (fd 0/1 default to keyboard/VGA if NONE). */
+    fd_t            fds[TASK_MAX_FDS];
     struct task    *next;
     /* Saved user-mode register state for fork trampoline. */
     registers_t     fork_regs;
@@ -72,5 +70,13 @@ int32_t task_waitpid(uint32_t pid); /* block until pid dies; frees it; returns p
 task_t *task_fork(registers_t *regs);
 
 __attribute__((noreturn)) void task_exit(void);
+
+/* ── fd helpers (used by syscall.c) ─────────────────────────────────────── */
+
+/* Duplicate an fd entry (increments pipe refcounts, copies vfs_file_t). */
+fd_t task_fd_dup(fd_t src);
+
+/* Close an fd entry and reset it to FD_NONE. */
+void task_fd_close(fd_t *fd);
 
 #endif
