@@ -2,7 +2,7 @@ Kern 2.0
 ========
 
 A hobby x86 kernel written in C and x86 assembly, built from scratch without
-any standard library. Boots via GRUB (Multiboot 1), runs in 32-bit protected
+any standard library.  Boots via GRUB (Multiboot 1), runs in 32-bit protected
 mode with a higher-half layout, and supports preemptive multitasking with
 user-space processes running in ring 3.
 
@@ -27,6 +27,9 @@ Building and Running
   make run-debug    Launch with QEMU interrupt/CPU-reset logging to qemu-debug.log
   make clean        Remove all build artefacts
 
+Header dependency tracking is enabled (-MMD -MP); changing any .h file causes
+only the affected .c files to recompile.
+
 
 Project Structure
 -----------------
@@ -34,13 +37,13 @@ Project Structure
   boot/             Multiboot header, paging bootstrap, kernel entry point
   cpu/              GDT (6 entries + TSS), IDT, ISR stubs, PIC, exceptions
   drivers/          VGA text driver, PS/2 keyboard, PIT timer, serial (COM1)
-  fs/               Virtual filesystem (VFS) backed by the initrd
-  kernel/           kernel_main, shell, ELF32 loader, kprintf, panic
-  lib/              (empty — libc-equivalents are in kernel/ or inline)
+  fs/               VFS layer: read-only initrd + writable tmpfs
+  kernel/           kernel_main, kernel shell, ELF32 loader, kprintf, panic
+  lib/              kstring helpers
   mm/               PMM (bitmap), VMM (4 KB paging, per-task PDs), heap
-  proc/             Task/scheduler, context switch, syscall gate, usermode entry
+  proc/             Task/scheduler, context switch, syscall gate, signals, pipes
   tools/            mkinitrd.py — packs ELF binaries into an initrd image
-  userland/         user.ld linker script, lib.h (tiny libc), test.c
+  userland/         user.ld linker script, lib.h (tiny libc), userland programs
 
 
 Memory Layout
@@ -55,124 +58,162 @@ Memory Layout
   Virtual  0xC0137014  _kernel_end → heap starts here (2 MB, kmalloc/kfree)
   Virtual  0xBFFEC000  User stack base  (16 KB per process, just below kernel)
   Virtual  0xBFFF0000  USER_STACK_TOP (initial ring-3 ESP)
+  Virtual  0x00400000  User ELF load address
 
 
 Kernel Subsystems
 -----------------
 
 Boot (boot/boot.s)
-  Multiboot-compliant entry. Before paging: maps the first 4 MB identity and
+  Multiboot-compliant entry.  Before paging: maps the first 4 MB identity and
   kernel VMA via 4 MB PSE PDEs, enables paging, jumps to the higher-half entry.
   After paging: sets the boot stack (16 KB in .bss) and calls kernel_main.
 
 GDT  [cpu/gdt.c]
   Six entries: null, kernel code (ring 0), kernel data (ring 0), user code
-  (ring 3), user data (ring 3), and a 32-bit TSS descriptor. The TSS holds
+  (ring 3), user data (ring 3), and a 32-bit TSS descriptor.  The TSS holds
   SS0/ESP0 which the CPU reads on every ring-3 → ring-0 transition; it is
   updated per-task by tss_set_kernel_stack() before each user-mode entry and
   after every context switch.
 
 IDT + PIC  [cpu/idt.c, cpu/isr.s]
-  The 8259 PIC is remapped so IRQs 0-15 land on vectors 0x20-0x2F. The IDT
+  The 8259 PIC is remapped so IRQs 0-15 land on vectors 0x20-0x2F.  The IDT
   holds 32 exception gates (ring 0 only), 16 hardware IRQ gates (ring 0 only),
-  and one syscall gate at vector 0x80 (DPL=3, callable from ring 3). EOI is
+  and one syscall gate at vector 0x80 (DPL=3, callable from ring 3).  EOI is
   sent before calling the C handler so the PIC is unmasked while the handler
   runs — important because the timer handler may block inside task_yield().
 
 PS/2 Keyboard  [drivers/keyboard.c]
-  Scan-code set 1 translated on IRQ 1. Characters land in a 256-byte circular
-  ring buffer. keyboard_getchar() busy-waits with hlt until a character arrives.
+  Scan-code set 1 translated on IRQ 1.  Tracks shift and ctrl modifiers.
+  Characters land in a 256-byte circular ring buffer.  Arrow keys emit ANSI
+  escape sequences (ESC [ A/B/C/D).  Ctrl+C delivers SIGINT to the foreground
+  task rather than buffering 0x03.
 
 PIT Timer  [drivers/timer.c]
-  Channel 0 programmed to 1000 Hz (1 ms per tick). A registered callback
+  Channel 0 programmed to 1000 Hz (1 ms per tick).  A registered callback
   (scheduler_tick) fires on each IRQ 0 to advance the preemptive scheduler.
 
 VGA Text Driver  [drivers/vga.c]
-  Writes to 0xB8000. Supports newlines, scrolling, backspace, and colour.
+  Writes to 0xB8000.  Supports newlines, scrolling, backspace, and colour.
 
 Serial  [drivers/serial.c]
   COM1 at 9600 baud, used for debug output alongside the VGA display.
 
 PMM  [mm/pmm.c]
   Parses the Multiboot memory map and maintains a bit-per-frame bitmap covering
-  up to 4 GB. The first 1 MB, the kernel image, the initrd, and the heap are
-  permanently reserved. pmm_alloc_frame() returns the lowest free 4 KB frame;
+  up to 4 GB.  The first 1 MB, the kernel image, the initrd, and the heap are
+  permanently reserved.  pmm_alloc_frame() returns the lowest free 4 KB frame;
   pmm_free_frame() returns it.
 
 VMM / Paging  [mm/vmm.c]
-  Switches from the boot PSE map to proper 4 KB pages during vmm_init(). The
+  Switches from the boot PSE map to proper 4 KB pages during vmm_init().  The
   kernel PD maps 32 MB of physical memory at 0xC0000000 (8 pre-allocated page
-  tables). Per-task page directories share these kernel PDEs (indices 768-1023)
-  and have private user-space PDEs (indices 0-767). Key operations:
-    vmm_create_pd()     new empty PD with shared kernel half
-    vmm_destroy_pd()    free all user pages, page tables, and the PD itself
-    vmm_clone_pd()      deep-copy for fork() — new PTs and new page frames
-    vmm_map_in_pd()     map a page in an arbitrary (non-current) PD
-    vmm_switch()        load a PD by writing its physical address to CR3
+  tables).  Per-task page directories share these kernel PDEs (indices 768-1023)
+  and have private user-space PDEs (indices 0-767).  Key operations:
+    vmm_create_pd()       new empty PD with shared kernel half
+    vmm_destroy_pd()      free all user pages, page tables, and the PD itself
+    vmm_clone_pd()        deep-copy for fork() — new PTs and new page frames
+    vmm_map_in_pd()       map a page in an arbitrary (non-current) PD
+    vmm_switch()          load a PD by writing its physical address to CR3
+    vmm_virt_to_phys()    walk PD/PT hierarchy to resolve a user virtual address
 
 Heap  [mm/heap.c]
   A linked-list free-list allocator in a 2 MB region immediately after the
-  kernel image. First-fit; kfree() coalesces adjacent free blocks.
+  kernel image.  First-fit; kfree() coalesces adjacent free blocks.
 
 ELF Loader  [kernel/elf.c]
   Loads PT_LOAD segments from an ELF32 executable into a given page directory,
-  maps the user stack (16 KB below USER_STACK_TOP), and returns the entry point.
+  maps the user stack (16 KB below USER_STACK_TOP), sets up argc/argv via
+  elf_setup_argv() which writes the argument frame using vmm_virt_to_phys(),
+  and returns the initial ESP.
 
-VFS + initrd  [fs/vfs.c]
-  The initrd is a custom packed binary (produced by tools/mkinitrd.py) containing
-  named file entries. vfs_open/read/close give read-only access to the files.
-  Used by the kernel to load ELF binaries on demand.
+VFS  [fs/vfs.c, fs/tmpfs.c]
+  Two-layer filesystem:
+
+  initrd (read-only)  — custom packed binary produced by tools/mkinitrd.py.
+                        vfs_open() searches here first.
+
+  tmpfs (writable)    — 16-slot in-memory filesystem backed by kmalloc'd buffers
+                        that grow on demand.  Files persist until reboot.
+                        vfs_create() truncates-or-creates; vfs_open_append()
+                        positions at EOF.  vfs_getent() enumerates both layers.
+
+  vfs_file_t has a src discriminator (VFS_INITRD / VFS_TMPFS); vfs_read and
+  vfs_write dispatch on it.
+
+Signals  [proc/signal.h, proc/task.c]
+  POSIX-compatible signal numbers: SIGINT(2), SIGKILL(9), SIGPIPE(13).
+  Per-task state: pending_sigs bitmask + sig_action[] (SIG_DFL or SIG_IGN).
+  task_signal() sets the pending bit and wakes sleeping tasks.
+  signals_deliver() is called at the end of every syscall; terminates the task
+  on any death-inducing signal using the default handler.  User-space custom
+  handlers are not yet implemented.
+  A global fg_task pointer is managed by task_set_fg/task_get_fg; the shell
+  registers the foreground child before waitpid so Ctrl+C reaches the right task.
 
 Task / Scheduler  [proc/task.c, proc/scheduler.c]
   Preemptive round-robin scheduler with a 10 ms quantum (10 × 1 ms timer ticks).
   Each task_t holds a kernel stack (8 KB embedded in the struct), a page-directory
-  physical address (cr3), saved ESP, and per-task open-file table (8 FDs).
-  Task states: RUNNING, READY, SLEEPING, DEAD.
+  physical address (cr3), saved ESP, per-task open-file table (8 FDs), and signal
+  state.  Task states: RUNNING, READY, SLEEPING, DEAD.
 
   task_create()   kernel-mode task (own PD, kernel stack)
   task_exec()     ELF task: load binary, enter ring-3 via enter_usermode()
   task_fork()     clone current task: vmm_clone_pd + fork_enter_user assembly
   task_waitpid()  block until a child exits, then reap it
   task_sleep()    sleep for N ms (SLEEPING state, woken by scheduler_tick)
-  task_exit()     mark DEAD, free user address space, yield
+  task_exit()     close all FDs, free user address space, mark DEAD, yield
+  task_signal()   set a pending signal; wake sleeping tasks immediately
 
 Context Switch  [cpu/context_switch.s]
   switch_context() saves/restores ebx, esi, edi, ebp, eflags on the kernel
-  stack and swaps ESP. fork_enter_user() builds a popa+iret frame from a
+  stack and swaps ESP.  fork_enter_user() builds a popa+iret frame from a
   saved registers_t so a forked child resumes exactly at the fork() call site
   with eax=0.
 
+Pipes  [proc/pipe.c, proc/fd.h]
+  4 KB ring-buffer pipes with reader/writer refcounting.  fd_t is a tagged union
+  (FD_NONE, FD_FILE, FD_FILE_W, FD_PIPE_R, FD_PIPE_W).  Blocking reads/writes
+  yield until data is available.  Broken-pipe writes deliver SIGPIPE.
+
 Syscalls  [proc/syscall.c]
   int 0x80, eax = syscall number, ebx/ecx/edx = arguments, return in eax.
+  signals_deliver() is called at the end of every handler.
 
-    0  exit      terminate calling task
-    1  write     write bytes to fd (fd 1 = VGA stdout; pipe write ends also work)
-    2  open      open a file from the initrd by name
-    3  read      read from fd (fd 0 = keyboard; pipe read ends block until data)
-    4  close     close a file descriptor
-    5  getpid    return the calling task's PID
-    6  sbrk      grow user heap by N bytes; returns old program break
-    7  fork      clone task (deep-copy address space); returns 0 in child
-    8  waitpid   wait for a child PID to exit
-    9  exec      ebx=path, ecx=cmdline — replace image; sets up argc/argv
-   10  sleep     sleep for N milliseconds
-   11  pipe      ebx=int[2] out-ptr; fills [0]=read fd, [1]=write fd
-   12  dup2      ebx=old_fd, ecx=new_fd — duplicate fd (used for redirections)
-   13  getdent   ebx=index, ecx=buf, edx=bufsz — return nth initrd filename
+     0  exit      terminate calling task
+     1  write     fd 1=VGA; FD_FILE_W=tmpfs; FD_PIPE_W=blocking pipe write
+     2  open      open a file from initrd (read-only)
+     3  read      fd 0=keyboard (len=1: raw, len>1: cooked+echo); FD_FILE; FD_PIPE_R
+     4  close     close a file descriptor
+     5  getpid    return the calling task's PID
+     6  sbrk      grow user heap by N bytes; returns old program break
+     7  fork      clone task (deep-copy address space); returns 0 in child
+     8  waitpid   wait for a child PID to exit
+     9  exec      ebx=path, ecx=cmdline — replace image; sets up argc/argv
+    10  sleep     sleep for N milliseconds
+    11  pipe      ebx=int[2] — fills [0]=read fd, [1]=write fd
+    12  dup2      ebx=old_fd, ecx=new_fd — duplicate fd
+    13  getdent   ebx=idx, ecx=buf, edx=bufsz — enumerate initrd+tmpfs entries
+    14  kill      ebx=pid, ecx=sig — send signal to a task
+    15  signal    ebx=sig, ecx=SIG_DFL/SIG_IGN — set disposition; returns old
+    16  setfg     ebx=pid — register foreground task for Ctrl+C (0=clear)
+    17  open2     ebx=path, ecx=flags — open with O_RDONLY/O_WRONLY/O_CREAT/O_APPEND
+
 
 Userland  [userland/]
+---------------------
+
   Tiny freestanding libc (lib.h): syscall wrappers, printf, puts, strlen,
   strcmp, strncmp, strncpy, memset, memcpy, malloc/free/realloc.
   Compiled with -ffreestanding -nostdlib, linked at 0x400000.
 
   Programs packed into the initrd:
-    sh      Userland shell: reads commands, fork+exec's programs, waitpid.
-            Supports pipelines (cmd1 | cmd2 | ...).  Launched automatically.
+    sh      Userland shell (see below).  Launched automatically by kernel_main.
     echo    Prints argv[1..] separated by spaces.
     cat     Reads files (or stdin) and writes to stdout.
-    ls      Lists initrd files via SYS_GETDENT.
-    wc      Counts lines, words, and characters from stdin or files.
-    grep    Prints lines containing a literal pattern (from stdin or files).
+    ls      Lists initrd+tmpfs files via SYS_GETDENT.
+    wc      Counts lines, words, and characters.
+    grep    Prints lines containing a literal pattern.
     test    fork/waitpid/sleep/malloc smoke test.
 
   argc/argv: elf_setup_argv() writes the argument frame onto the user stack
@@ -183,16 +224,32 @@ Userland  [userland/]
 Userland Shell (sh)
 -------------------
 
-  The userland shell launches automatically.  Type any initrd filename to run
-  it.  Built-ins: help, exit.  Pipelines with | are supported.
+  The userland shell launches automatically.  Built-ins: help, exit.
+
+  Line editing
+    - Backspace erases the previous character.
+    - Up/Down arrows navigate command history (last 16 entries).
+    - Ctrl+C prints ^C, clears the line, and interrupts any running foreground
+      program without killing the shell.
+
+  Pipelines
+    cmd1 | cmd2 | cmd3     (up to 4 stages)
+
+  I/O redirection (per pipeline stage)
+    cmd < infile
+    cmd > outfile          (creates or truncates a tmpfs file)
+    cmd >> outfile         (creates or appends to a tmpfs file)
 
   Examples:
     $ ls
     $ echo hello world
-    $ cat test
-    $ test
+    $ echo hello > greeting.txt
+    $ cat greeting.txt
+    $ cat greeting.txt >> greeting.txt
     $ ls | wc
     $ ls | grep sh
+    $ echo one > f && echo two >> f && cat f
+
 
 Kernel Shell (fallback)
 -----------------------
@@ -218,14 +275,14 @@ Known Issues / Work in Progress
 
   None known.  Recent fixes:
 
-  - TSS ESP0 / fork+sleep crash: root cause was a reentrancy bug in
-    task_yield().  When called with IF=1 (direct path: task_sleep, task_wait)
-    the timer IRQ could fire between "current = next" and switch_context,
-    causing the nested scheduler_tick to read the wrong current and corrupt
-    saved stack pointers.  Fixed by saving IF and issuing CLI at the start of
-    task_yield, then restoring IF (per-task, from the saved value on the kernel
-    stack) after switch_context and tss_set_kernel_stack.
+  - Struct layout mismatch crash on first run: scheduler.o was compiled against
+    the old task.h (fds as vfs_file_t*[8]) while task.c used the new fd_t[8].
+    Fixed by adding -MMD -MP to CFLAGS so header changes trigger recompilation.
+
+  - TSS ESP0 / fork+sleep crash: reentrancy bug in task_yield().  Timer IRQ
+    could fire between "current = next" and switch_context, causing the nested
+    scheduler to corrupt saved stack pointers.  Fixed by CLI at entry and
+    conditional STI after switch_context+tss_set_kernel_stack.
 
   - Initial kernel stack frame order in task_alloc() was wrong: eflags and ebx
-    were swapped, so new tasks started with IF=0.  Fixed; frame now matches the
-    pop order in switch_context (popf first, ret last).
+    were swapped, so new tasks started with IF=0.  Fixed.
