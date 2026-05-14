@@ -1,4 +1,5 @@
 #include "task.h"
+#include "signal.h"
 #include "pipe.h"
 #include "vfs.h"
 #include "heap.h"
@@ -14,11 +15,12 @@
 
 fd_t task_fd_dup(fd_t src) {
     switch (src.type) {
-        case FD_FILE: {
+        case FD_FILE:
+        case FD_FILE_W: {
             /* Give the child its own vfs_file_t so positions are independent. */
             vfs_file_t *f2 = (vfs_file_t *)kmalloc(sizeof(vfs_file_t));
             if (f2) *f2 = *src.file;
-            fd_t d; d.type = FD_FILE; d.file = f2;
+            fd_t d; d.type = src.type; d.file = f2;
             return d;
         }
         case FD_PIPE_R: src.pipe->readers++; return src;
@@ -29,7 +31,8 @@ fd_t task_fd_dup(fd_t src) {
 
 void task_fd_close(fd_t *fd) {
     switch (fd->type) {
-        case FD_FILE:   vfs_close(fd->file);          break;
+        case FD_FILE:
+        case FD_FILE_W: vfs_close(fd->file);          break;
         case FD_PIPE_R: pipe_close_reader(fd->pipe);  break;
         case FD_PIPE_W: pipe_close_writer(fd->pipe);  break;
         default: break;
@@ -272,4 +275,34 @@ __attribute__((noreturn)) void task_exit(void) {
     task_yield();
     for (;;) __asm__ volatile ("hlt");
     __builtin_unreachable();
+}
+
+/* ── Signal support ───────────────────────────────────────────────────────── */
+
+static task_t *fg_task = NULL;
+
+void task_set_fg(task_t *t)  { fg_task = t; }
+task_t *task_get_fg(void)    { return fg_task; }
+
+void task_signal(task_t *t, int sig) {
+    if (!t || sig < 1 || sig >= NSIG) return;
+    if (t->sig_action[sig] == SIG_IGN) return;
+    t->pending_sigs |= (1u << sig);
+    /* Wake a sleeping task so it sees the signal promptly. */
+    if (t->state == TASK_SLEEPING)
+        t->state = TASK_READY;
+}
+
+/*
+ * Deliver any pending signals for the current (user) task.
+ * Must be called just before returning to ring-3 (end of syscall/IRQ).
+ * For now all terminating signals use the default handler (task_exit).
+ */
+void signals_deliver(void) {
+    task_t *t = current;
+    if (!t || !t->pending_sigs || !t->user_entry) return;
+    uint32_t p = t->pending_sigs;
+    t->pending_sigs = 0;
+    if (p & ((1u << SIGINT) | (1u << SIGKILL) | (1u << SIGPIPE)))
+        task_exit();
 }

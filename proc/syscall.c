@@ -1,4 +1,5 @@
 #include "syscall.h"
+#include "signal.h"
 #include "idt.h"
 #include "task.h"
 #include "pipe.h"
@@ -52,14 +53,23 @@ static void syscall_handler(registers_t *regs) {
             break;
         }
 
+        if (f->type == FD_FILE_W) {
+            regs->eax = vfs_write(f->file, buf, len);
+            break;
+        }
+
         if (f->type == FD_PIPE_W) {
-            /* Blocking write: yield until there is space. */
+            /* Blocking write: yield until there is space or no readers. */
             uint32_t written = 0;
             while (written < len) {
-                if (!f->pipe->readers) { regs->eax = (uint32_t)-1; goto write_done; }
+                if (!f->pipe->readers) {
+                    /* Broken pipe — deliver SIGPIPE and return error. */
+                    task_signal(task_current(), SIGPIPE);
+                    regs->eax = (uint32_t)-1; goto write_done;
+                }
+                if (task_current()->pending_sigs) { regs->eax = (uint32_t)-1; goto write_done; }
                 int32_t n = pipe_write(f->pipe, buf + written, len - written);
                 if (n > 0) { written += (uint32_t)n; continue; }
-                /* Pipe full — yield until reader drains it. */
                 __asm__ volatile ("sti");
                 task_yield();
             }
@@ -99,25 +109,32 @@ static void syscall_handler(registers_t *regs) {
 
         if (f->type == FD_NONE) {
             if (fd == 0) {
-                /* Keyboard: line-buffered, echo chars. */
                 __asm__ volatile ("sti");
-                uint32_t n = 0;
-                while (n < len) {
-                    char c = keyboard_getchar();
-                    if (c == '\b') {
-                        if (n > 0) {
-                            n--;
-                            terminal_putchar('\b');
-                            terminal_putchar(' ');
-                            terminal_putchar('\b');
+                if (len == 1) {
+                    /* Raw single-char read: no echo, no buffering.
+                     * Used by the shell readline for interactive line editing. */
+                    buf[0] = keyboard_getchar();
+                    regs->eax = 1;
+                } else {
+                    /* Cooked read: echo + newline-terminate. */
+                    uint32_t n = 0;
+                    while (n < len) {
+                        char c = keyboard_getchar();
+                        if (c == '\b') {
+                            if (n > 0) {
+                                n--;
+                                terminal_putchar('\b');
+                                terminal_putchar(' ');
+                                terminal_putchar('\b');
+                            }
+                            continue;
                         }
-                        continue;
+                        terminal_putchar(c);
+                        buf[n++] = c;
+                        if (c == '\n') break;
                     }
-                    terminal_putchar(c);
-                    buf[n++] = c;
-                    if (c == '\n') break;
+                    regs->eax = n;
                 }
-                regs->eax = n;
             } else {
                 regs->eax = (uint32_t)-1;
             }
@@ -130,9 +147,11 @@ static void syscall_handler(registers_t *regs) {
         }
 
         if (f->type == FD_PIPE_R) {
-            /* Blocking read: yield until data or EOF. */
+            /* Blocking read: yield until data, EOF, or signal. */
             while (f->pipe->len == 0) {
-                if (!f->pipe->writers) { regs->eax = 0; goto read_done; }
+                if (!f->pipe->writers || task_current()->pending_sigs) {
+                    regs->eax = 0; goto read_done;
+                }
                 __asm__ volatile ("sti");
                 task_yield();
             }
@@ -308,10 +327,81 @@ static void syscall_handler(registers_t *regs) {
         break;
     }
 
+    /* SYS_KILL (14): kill(pid, sig) */
+    case SYS_KILL: {
+        uint32_t pid = regs->ebx;
+        int      sig = (int)regs->ecx;
+        task_t  *head = task_list_head();
+        if (!head) { regs->eax = (uint32_t)-1; break; }
+        task_t *t = head;
+        do {
+            if (t->pid == pid) { task_signal(t, sig); regs->eax = 0; goto kill_done; }
+            t = t->next;
+        } while (t != head);
+        regs->eax = (uint32_t)-1;
+    kill_done: break;
+    }
+
+    /* SYS_SIGNAL (15): signal(sig, SIG_DFL/SIG_IGN) → old disposition */
+    case SYS_SIGNAL: {
+        int      sig  = (int)regs->ebx;
+        uint32_t disp = regs->ecx; /* SIG_DFL=0, SIG_IGN=1 */
+        if (sig < 1 || sig >= NSIG) { regs->eax = (uint32_t)-1; break; }
+        task_t *t = task_current();
+        regs->eax = t->sig_action[sig];
+        t->sig_action[sig] = disp;
+        break;
+    }
+
+    /* SYS_SETFG (16): setfg(pid) — set foreground task for Ctrl+C (0=clear) */
+    case SYS_SETFG: {
+        uint32_t pid = regs->ebx;
+        if (pid == 0) { task_set_fg(NULL); regs->eax = 0; break; }
+        task_t *head = task_list_head();
+        task_t *t = head;
+        if (head) do {
+            if (t->pid == pid) { task_set_fg(t); regs->eax = 0; goto setfg_done; }
+            t = t->next;
+        } while (t != head);
+        regs->eax = (uint32_t)-1;
+    setfg_done: break;
+    }
+
+    /* SYS_OPEN2 (17): open2(path, flags)
+     * flags: O_RDONLY=0, O_WRONLY|O_CREAT=open for writing (truncate),
+     *        O_WRONLY|O_CREAT|O_APPEND=open for appending. */
+    case SYS_OPEN2: {
+        task_t     *t     = task_current();
+        const char *path  = (const char *)(uintptr_t)regs->ebx;
+        uint32_t    flags = regs->ecx;
+
+        uint32_t fd = alloc_fd(t, 0);
+        if (fd == TASK_MAX_FDS) { regs->eax = (uint32_t)-1; break; }
+
+        if (flags & O_WRONLY) {
+            vfs_file_t *vf = (flags & O_APPEND) ? vfs_open_append(path)
+                                                  : vfs_create(path);
+            if (!vf) { regs->eax = (uint32_t)-1; break; }
+            t->fds[fd].type = FD_FILE_W;
+            t->fds[fd].file = vf;
+        } else {
+            /* Read-only: same as SYS_OPEN */
+            vfs_file_t *vf = vfs_open(path);
+            if (!vf) { regs->eax = (uint32_t)-1; break; }
+            t->fds[fd].type = FD_FILE;
+            t->fds[fd].file = vf;
+        }
+        regs->eax = fd;
+        break;
+    }
+
     default:
         regs->eax = (uint32_t)-1;
         break;
     }
+
+    /* Deliver any pending signals before returning to user space. */
+    signals_deliver();
 }
 
 void syscall_init(void) {

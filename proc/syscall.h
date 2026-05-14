@@ -16,6 +16,16 @@
 #define SYS_PIPE    11  /* pipe(fds[2]) — fds[0]=read, fds[1]=write        */
 #define SYS_DUP2    12  /* dup2(old_fd, new_fd)                             */
 #define SYS_GETDENT 13  /* getdent(idx, buf, bufsz) → name len (0 = done)  */
+#define SYS_KILL    14  /* kill(pid, sig)                                   */
+#define SYS_SIGNAL  15  /* signal(sig, disposition) → old; SIG_DFL=0, SIG_IGN=1 */
+#define SYS_SETFG   16  /* setfg(pid) — foreground pid for Ctrl+C (0=clear)*/
+#define SYS_OPEN2   17  /* open2(path, flags) — open with O_CREAT support  */
+
+/* open2 flags */
+#define O_RDONLY   0
+#define O_WRONLY   1
+#define O_CREAT    0x40
+#define O_APPEND   0x400
 
 void syscall_init(void);
 

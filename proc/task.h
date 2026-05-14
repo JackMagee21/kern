@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include "idt.h"
 #include "fd.h"
+#include "signal.h"
 
 #define TASK_STACK_SIZE  8192u
 #define TASK_NAME_LEN    16u
@@ -28,6 +29,9 @@ typedef struct task {
     uint32_t        user_entry;     /* ELF entry point (user virtual)       */
     uint32_t        user_stack_top; /* initial user ESP (after argv setup)  */
     uint32_t        brk;            /* program break (end of user heap)     */
+    /* Signal state. */
+    uint32_t        pending_sigs;
+    uint32_t        sig_action[NSIG];   /* SIG_DFL or SIG_IGN per signal */
     /* Open file descriptor table (fd 0/1 default to keyboard/VGA if NONE). */
     fd_t            fds[TASK_MAX_FDS];
     struct task    *next;
@@ -78,5 +82,13 @@ fd_t task_fd_dup(fd_t src);
 
 /* Close an fd entry and reset it to FD_NONE. */
 void task_fd_close(fd_t *fd);
+
+/* Signal support. */
+void     task_signal(task_t *t, int sig);
+void     signals_deliver(void);     /* call at syscall/IRQ exit for user tasks */
+
+/* Foreground task tracking (for Ctrl+C). */
+void     task_set_fg(task_t *t);
+task_t  *task_get_fg(void);
 
 #endif

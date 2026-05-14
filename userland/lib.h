@@ -29,6 +29,25 @@ typedef unsigned int   size_t;
 #define SYS_PIPE    11
 #define SYS_DUP2    12
 #define SYS_GETDENT 13
+#define SYS_KILL    14
+#define SYS_SIGNAL  15
+#define SYS_SETFG   16
+#define SYS_OPEN2   17
+
+/* Signal numbers */
+#define SIGINT   2
+#define SIGKILL  9
+#define SIGPIPE 13
+
+/* Signal dispositions */
+#define SIG_DFL 0u
+#define SIG_IGN 1u
+
+/* open2 flags */
+#define O_RDONLY  0
+#define O_WRONLY  1
+#define O_CREAT   0x40
+#define O_APPEND  0x400
 
 /* ── Raw syscall wrappers ───────────────────────────────────────────────── */
 
@@ -116,6 +135,37 @@ static inline int sys_getdent(unsigned idx, char *buf, unsigned bufsz) {
     int ret;
     __asm__ volatile ("int $0x80"
         : "=a"(ret) : "0"(SYS_GETDENT), "b"(idx), "c"(buf), "d"(bufsz) : "memory");
+    return ret;
+}
+
+static inline int sys_kill(unsigned pid, int sig) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_KILL), "b"(pid), "c"(sig) : "memory");
+    return ret;
+}
+
+/* signal(sig, SIG_DFL/SIG_IGN) — returns old disposition */
+static inline unsigned sys_signal(int sig, unsigned disp) {
+    unsigned ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_SIGNAL), "b"(sig), "c"(disp) : "memory");
+    return ret;
+}
+
+/* setfg(pid) — register pid as foreground for Ctrl+C (0 = clear) */
+static inline int sys_setfg(unsigned pid) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_SETFG), "b"(pid) : "memory");
+    return ret;
+}
+
+/* open2(path, flags) — supports O_RDONLY, O_WRONLY|O_CREAT, O_APPEND */
+static inline int sys_open2(const char *path, int flags) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_OPEN2), "b"(path), "c"(flags) : "memory");
     return ret;
 }
 
