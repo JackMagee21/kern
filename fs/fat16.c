@@ -2,6 +2,7 @@
 #include "ata.h"
 #include "printf.h"
 #include <stdint.h>
+#include <stddef.h>
 
 /* ── On-disk structures ────────────────────────────────────────────────── */
 
@@ -45,30 +46,34 @@ typedef struct {
 #define FAT_BAD      0xFFF7u
 #define FAT_FREE     0x0000u
 
+#define FIND_FILES  0x1
+#define FIND_DIRS   0x2
+
 /* ── Filesystem state ───────────────────────────────────────────────────── */
 
-static int      fs_ok        = 0;
-static uint32_t g_bps        = 512;   /* bytes per sector   */
-static uint32_t g_spc        = 1;     /* sectors per cluster */
-static uint32_t g_spf        = 0;     /* sectors per FAT    */
-static uint32_t g_fat_lba    = 0;     /* LBA of FAT1        */
-static uint32_t g_root_lba   = 0;     /* LBA of root dir    */
-static uint32_t g_root_secs  = 0;     /* sectors in root dir */
-static uint32_t g_data_lba   = 0;     /* LBA of data area   */
-static uint32_t g_root_ents  = 0;     /* max root dir entries */
-static uint32_t g_fat_count  = 0;
+static int      fs_ok       = 0;
+static uint32_t g_bps       = 512;
+static uint32_t g_spc       = 1;
+static uint32_t g_spf       = 0;
+static uint32_t g_fat_lba   = 0;
+static uint32_t g_root_lba  = 0;
+static uint32_t g_root_secs = 0;
+static uint32_t g_data_lba  = 0;
+static uint32_t g_root_ents = 0;
+static uint32_t g_fat_count = 0;
 
-/* Single working sector buffer — all I/O goes through here. */
 static uint8_t  sec[512];
+static uint8_t  zerosec[512];   /* BSS-zeroed; used to wipe new clusters */
 
-/* Static zero-filled buffer for zeroing freshly allocated clusters. */
-static uint8_t  zerosec[512];   /* BSS zero init — no explicit zeroing needed */
+/* LBA whose data is currently in sec[]. */
+static uint32_t cur_lba = 0;
 
-/* ── Low-level helpers ──────────────────────────────────────────────────── */
+/* ── Low-level sector I/O ───────────────────────────────────────────────── */
 
 static int rsec(uint32_t lba) {
     int r = ata_read(lba, 1, sec);
     if (r < 0) kprintf("fat16: rsec(%u) FAILED\n", lba);
+    cur_lba = lba;
     return r;
 }
 static int wsec(uint32_t lba) {
@@ -76,9 +81,39 @@ static int wsec(uint32_t lba) {
     if (r < 0) kprintf("fat16: wsec(%u) FAILED\n", lba);
     return r;
 }
+static int wsec_cur(void) { return wsec(cur_lba); }
 
 static uint32_t cluster_to_lba(uint16_t cluster) {
     return g_data_lba + (uint32_t)(cluster - 2u) * g_spc;
+}
+
+/* ── Directory sector I/O ───────────────────────────────────────────────── */
+
+/*
+ * Read the sec_idx-th sector of a directory into sec[], updating cur_lba.
+ * dir_cluster==0  → root directory (fixed LBA range).
+ * dir_cluster>=2  → subdirectory stored as a cluster chain.
+ */
+static int dir_rsec(uint16_t dir_cluster, uint32_t sec_idx) {
+    if (dir_cluster == 0) {
+        if (sec_idx >= g_root_secs) return -1;
+        return rsec(g_root_lba + sec_idx);
+    }
+    uint32_t ci = sec_idx / g_spc;  /* cluster index along the chain */
+    uint32_t si = sec_idx % g_spc;  /* sector within that cluster    */
+    uint16_t cl = dir_cluster;
+    for (uint32_t i = 0; i < ci; i++) {
+        /* fat_get calls rsec internally, clobbering sec[]/cur_lba. */
+        uint32_t byte_off = (uint32_t)cl * 2u;
+        uint32_t flba = g_fat_lba + byte_off / g_bps;
+        uint32_t foff = byte_off % g_bps;
+        if (rsec(flba) < 0) return -1;
+        uint16_t next;
+        __builtin_memcpy(&next, sec + foff, 2);
+        if (next < 2 || next >= FAT_EOC) return -1;
+        cl = next;
+    }
+    return rsec(cluster_to_lba(cl) + si);
 }
 
 /* ── FAT operations ─────────────────────────────────────────────────────── */
@@ -97,7 +132,6 @@ static int fat_set(uint16_t cluster, uint16_t value) {
     uint32_t byte_off = (uint32_t)cluster * 2u;
     uint32_t rel_sec  = byte_off / g_bps;
     uint32_t off      = byte_off % g_bps;
-    /* Update both FAT copies. */
     for (uint32_t f = 0; f < g_fat_count; f++) {
         uint32_t lba = g_fat_lba + f * g_spf + rel_sec;
         if (rsec(lba) < 0) return -1;
@@ -107,26 +141,21 @@ static int fat_set(uint16_t cluster, uint16_t value) {
     return 0;
 }
 
-/* Allocate a free cluster: marks it EOC in FAT and zeroes its sectors. */
 static uint16_t fat_alloc(void) {
-    kprintf("fat16: fat_alloc scanning...\n");
     uint32_t max_cluster = (g_spf * g_bps) / 2u;
     if (max_cluster > 0xFFF0u) max_cluster = 0xFFF0u;
-
     for (uint16_t c = 2; c < (uint16_t)max_cluster; c++) {
         if (fat_get(c) == FAT_FREE) {
             fat_set(c, 0xFFFFu);
-            /* Zero every sector of this cluster. */
             uint32_t base = cluster_to_lba(c);
             for (uint32_t s = 0; s < g_spc; s++)
                 ata_write(base + s, 1, zerosec);
             return c;
         }
     }
-    return 0; /* disk full */
+    return 0;
 }
 
-/* Free an entire cluster chain. */
 static void fat_free_chain(uint16_t cluster) {
     while (cluster >= 2u && cluster < FAT_EOC && cluster != FAT_BAD) {
         uint16_t next = fat_get(cluster);
@@ -135,42 +164,38 @@ static void fat_free_chain(uint16_t cluster) {
     }
 }
 
-/*
- * Walk the cluster chain from first_cluster to the cluster that contains
- * byte offset pos.  If the chain is shorter than needed and alloc==1,
- * new clusters are appended; *first_ptr is updated if the file was empty.
- * Returns 0 on failure/EOF.
- */
 static uint16_t chain_walk(uint16_t *first_ptr, uint32_t pos, int alloc) {
     uint32_t cluster_bytes = g_spc * g_bps;
     uint32_t target_idx    = pos / cluster_bytes;
-
     uint16_t cluster = *first_ptr;
     uint16_t prev    = 0;
-
     for (uint32_t i = 0; i <= target_idx; i++) {
         if (cluster < 2u || cluster >= FAT_EOC) {
-            /* No more clusters — allocate if requested. */
             if (!alloc) return 0;
             uint16_t nc = fat_alloc();
             if (!nc) return 0;
-            if (prev) fat_set(prev, nc);   /* link previous → new */
-            else      *first_ptr = nc;     /* first cluster of file */
+            if (prev) fat_set(prev, nc);
+            else      *first_ptr = nc;
             cluster = nc;
         }
         if (i == target_idx) return cluster;
         prev    = cluster;
         cluster = fat_get(cluster);
     }
-    return 0; /* unreachable but keeps gcc happy */
+    return 0;
 }
 
 /* ── Name helpers ───────────────────────────────────────────────────────── */
 
-/* Convert any filename to the 11-byte 8.3 space-padded uppercase form. */
 static void to_83(const char *name, char out[11]) {
-    for (int i = 0; i < 11; i++) out[i] = ' ';
-    int i = 0;
+    int i;
+    for (i = 0; i < 11; i++) out[i] = ' ';
+    /* Special-case "." and ".." */
+    if (name[0] == '.' && name[1] == '\0') { out[0] = '.'; return; }
+    if (name[0] == '.' && name[1] == '.' && name[2] == '\0') {
+        out[0] = '.'; out[1] = '.'; return;
+    }
+    i = 0;
     while (*name && *name != '.' && i < 8) {
         char c = *name++;
         if (c >= 'a' && c <= 'z') c = (char)(c - 32);
@@ -197,7 +222,6 @@ static int cmp83(const char *a, const char *b, int len) {
     return 1;
 }
 
-/* Convert 8.3 dir name+ext to a printable "name.ext\0" string. */
 static void from_83(const char n[8], const char e[3], char out[13]) {
     int j = 0, i;
     for (i = 0; i < 8 && n[i] != ' '; i++) out[j++] = n[i];
@@ -210,30 +234,199 @@ static void from_83(const char n[8], const char e[3], char out[13]) {
     out[j] = '\0';
 }
 
-/* ── Directory helpers ──────────────────────────────────────────────────── */
+/* ── Directory search helpers ───────────────────────────────────────────── */
 
 /*
- * Update the first_cluster and size fields of a directory entry in place.
- * Reads the sector, modifies the dirent at byte offset dir_off, writes back.
+ * Search dir_cluster for a dirent whose 8.3 name matches name83[11].
+ * flags: FIND_FILES (skip subdirs), FIND_DIRS (skip files), or both.
+ * out_* parameters are optional (may be NULL).
  */
+static int find_in(uint16_t dir_cluster, const char name83[11], int flags,
+                   uint16_t *out_first, uint32_t *out_size,
+                   uint32_t *out_lba, uint32_t *out_off) {
+    uint32_t eps = g_bps / 32u;
+    for (uint32_t s = 0; ; s++) {
+        if (dir_rsec(dir_cluster, s) < 0) break;
+        for (uint32_t i = 0; i < eps; i++) {
+            dirent_t *d = (dirent_t *)(sec + i * 32u);
+            uint8_t first = (uint8_t)d->name[0];
+            if (first == 0x00) return -1;
+            if (first == 0xE5) continue;
+            if (d->attr & ATTR_VOLUME) continue;
+            int is_dir = (d->attr & ATTR_SUBDIR) ? 1 : 0;
+            if ( is_dir && !(flags & FIND_DIRS))  continue;
+            if (!is_dir && !(flags & FIND_FILES)) continue;
+            if (cmp83(d->name, name83, 8) && cmp83(d->ext, name83 + 8, 3)) {
+                if (out_first) *out_first = d->first_cluster;
+                if (out_size)  *out_size  = d->size;
+                if (out_lba)   *out_lba   = cur_lba;
+                if (out_off)   *out_off   = i * 32u;
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+/* Look up a subdirectory by plain name in dir_cluster. */
+static int find_subdir(uint16_t dir_cluster, const char *name, uint16_t *cluster_out) {
+    char name83[11];
+    to_83(name, name83);
+    return find_in(dir_cluster, name83, FIND_DIRS, cluster_out, NULL, NULL, NULL);
+}
+
+/*
+ * Resolve a path (with optional '/' separators) to the parent directory
+ * cluster and the basename component.
+ *
+ * Absolute paths ("/…") start from root (cluster 0).
+ * Relative paths start from cwd_cluster.
+ * basename_out points into a static buffer — use it before the next call.
+ */
+static int resolve_fat_path(const char *path, uint16_t cwd_cluster,
+                             uint16_t *dir_cluster_out, const char **basename_out) {
+    static char buf[256];
+    uint32_t i;
+    for (i = 0; path[i] && i < 255; i++) buf[i] = path[i];
+    buf[i] = '\0';
+
+    char *p = buf;
+    uint16_t dir = (*p == '/') ? 0 : cwd_cluster;
+    if (*p == '/') while (*p == '/') p++;
+
+    /* Walk all slash-separated components; stop at the last one (basename). */
+    char *basename = p;
+    for (;;) {
+        char *slash = p;
+        while (*slash && *slash != '/') slash++;
+        if (*slash == '\0') {   /* last component = basename */
+            basename = p;
+            break;
+        }
+        *slash = '\0';
+        if (p[0] != '\0') {
+            if (p[0] == '.' && p[1] == '\0') {
+                /* "." — stay */
+            } else if (p[0] == '.' && p[1] == '.' && p[2] == '\0') {
+                /* ".." — jump to parent via the ".." dirent */
+                if (dir != 0) {
+                    if (dir_rsec(dir, 0) >= 0) {
+                        dirent_t *dd = (dirent_t *)(sec + 32u);
+                        dir = dd->first_cluster;
+                    }
+                }
+            } else {
+                uint16_t next;
+                if (find_subdir(dir, p, &next) < 0) return -1;
+                dir = next;
+            }
+        }
+        p = slash + 1;
+        while (*p == '/') p++;
+    }
+    *dir_cluster_out = dir;
+    *basename_out    = basename;
+    return 0;
+}
+
+/* ── Directory write helpers ────────────────────────────────────────────── */
+
 static int update_dirent(uint32_t dir_lba, uint32_t dir_off,
                           uint16_t first_cluster, uint32_t size) {
-    kprintf("fat16: update_dirent lba=%u off=%u clus=%u sz=%u\n",
-            dir_lba, dir_off, first_cluster, size);
     if (rsec(dir_lba) < 0) return -1;
     dirent_t *d = (dirent_t *)(sec + dir_off);
     d->first_cluster = first_cluster;
     d->size          = size;
-    int r = wsec(dir_lba);
-    kprintf("fat16: update_dirent wsec=%d\n", r);
-    return r;
+    return wsec_cur();
+}
+
+/*
+ * Find (or allocate) a free dirent slot in dir_cluster.
+ * For subdirectories the chain is extended if no free slot exists.
+ * Root directories are fixed-size — returns -1 if full.
+ */
+static int alloc_dirent(uint16_t dir_cluster,
+                        uint32_t *lba_out, uint32_t *off_out) {
+    uint32_t eps = g_bps / 32u;
+    uint32_t total_secs = 0;
+    int found = 0;
+
+    for (uint32_t s = 0; !found; s++) {
+        if (dir_cluster == 0 && s >= g_root_secs) break;
+        if (dir_rsec(dir_cluster, s) < 0) break;
+        total_secs = s + 1;
+
+        for (uint32_t i = 0; i < eps; i++) {
+            uint8_t first = (uint8_t)sec[i * 32u];
+            if (first == 0x00 || first == 0xE5) {
+                *lba_out = cur_lba;
+                *off_out = i * 32u;
+                found = 1;
+                break;
+            }
+        }
+    }
+    if (found) return 0;
+    if (dir_cluster == 0) return -1;   /* root dir full */
+
+    /* Extend subdirectory chain. */
+    uint16_t dc = dir_cluster;
+    uint16_t new_cl = chain_walk(&dc, total_secs * g_bps, 1);
+    if (!new_cl) return -1;
+    *lba_out = cluster_to_lba(new_cl);
+    *off_out = 0;
+    return 0;
+}
+
+/* Internal: create/truncate a file entry inside a known directory. */
+static int create_in(uint16_t dir_cluster, const char *name,
+                     uint16_t *first_cluster_out,
+                     uint32_t *dir_lba_out, uint32_t *dir_off_out) {
+    char name83[11];
+    to_83(name, name83);
+
+    /* Check for existing file → truncate. */
+    uint16_t ex_first; uint32_t ex_lba, ex_off;
+    if (find_in(dir_cluster, name83, FIND_FILES,
+                &ex_first, NULL, &ex_lba, &ex_off) == 0) {
+        fat_free_chain(ex_first);
+        if (rsec(ex_lba) < 0) return -1;
+        dirent_t *d = (dirent_t *)(sec + ex_off);
+        d->first_cluster = 0;
+        d->size          = 0;
+        if (wsec_cur() < 0) return -1;
+        *first_cluster_out = 0;
+        *dir_lba_out = ex_lba;
+        *dir_off_out = ex_off;
+        return 0;
+    }
+
+    /* Allocate a free dirent slot. */
+    uint32_t free_lba, free_off;
+    if (alloc_dirent(dir_cluster, &free_lba, &free_off) < 0) return -1;
+
+    if (rsec(free_lba) < 0) return -1;
+    dirent_t *d = (dirent_t *)(sec + free_off);
+    for (int i = 0; i < 8;  i++) d->name[i] = name83[i];
+    for (int i = 0; i < 3;  i++) d->ext[i]  = name83[8 + i];
+    d->attr          = 0x20u;
+    for (int i = 0; i < 10; i++) d->reserved[i] = 0;
+    d->wr_time       = 0;
+    d->wr_date       = 0;
+    d->first_cluster = 0;
+    d->size          = 0;
+    if (wsec_cur() < 0) return -1;
+
+    *first_cluster_out = 0;
+    *dir_lba_out = free_lba;
+    *dir_off_out = free_off;
+    return 0;
 }
 
 /* ── Public API ─────────────────────────────────────────────────────────── */
 
 int fat16_init(void) {
     if (!ata_present()) return -1;
-
     if (rsec(0) < 0) return -1;
 
     bpb_t *bpb = (bpb_t *)sec;
@@ -257,142 +450,162 @@ int fat16_init(void) {
 
 int fat16_present(void) { return fs_ok; }
 
-int fat16_find(const char *name,
+int fat16_find(const char *path, uint16_t cwd_cluster,
                uint16_t *first_cluster, uint32_t *size,
                uint32_t *dir_lba, uint32_t *dir_off) {
     if (!fs_ok) return -1;
-
+    uint16_t dir; const char *base;
+    if (resolve_fat_path(path, cwd_cluster, &dir, &base) < 0) return -1;
+    if (!base || !base[0]) return -1;
     char name83[11];
-    to_83(name, name83);
-
-    uint32_t eps = g_bps / 32u;  /* directory entries per sector */
-
-    for (uint32_t s = 0; s < g_root_secs; s++) {
-        uint32_t lba = g_root_lba + s;
-        if (rsec(lba) < 0) return -1;
-
-        for (uint32_t i = 0; i < eps; i++) {
-            dirent_t *d = (dirent_t *)(sec + i * 32u);
-            uint8_t first = (uint8_t)d->name[0];
-
-            if (first == 0x00) return -1;  /* end of directory */
-            if (first == 0xE5) continue;   /* deleted entry     */
-            if (d->attr & (ATTR_VOLUME | ATTR_SUBDIR)) continue;
-
-            if (cmp83(d->name, name83, 8) && cmp83(d->ext, name83 + 8, 3)) {
-                *first_cluster = d->first_cluster;
-                *size          = d->size;
-                *dir_lba       = lba;
-                *dir_off       = i * 32u;
-                kprintf("fat16: find ok clus=%u size=%u\n", *first_cluster, *size);
-                return 0;
-            }
-        }
-    }
-    return -1;
+    to_83(base, name83);
+    return find_in(dir, name83, FIND_FILES, first_cluster, size, dir_lba, dir_off);
 }
 
-int fat16_create(const char *name,
-                 uint16_t *first_cluster,
-                 uint32_t *dir_lba, uint32_t *dir_off) {
+int fat16_create(const char *path, uint16_t cwd_cluster,
+                 uint16_t *first_cluster, uint32_t *dir_lba, uint32_t *dir_off) {
     if (!fs_ok) return -1;
+    uint16_t dir; const char *base;
+    if (resolve_fat_path(path, cwd_cluster, &dir, &base) < 0) return -1;
+    if (!base || !base[0]) return -1;
+    return create_in(dir, base, first_cluster, dir_lba, dir_off);
+}
+
+int fat16_delete(const char *path, uint16_t cwd_cluster) {
+    if (!fs_ok) return -1;
+    uint16_t dir; const char *base;
+    if (resolve_fat_path(path, cwd_cluster, &dir, &base) < 0) return -1;
+    if (!base || !base[0]) return -1;
 
     char name83[11];
-    to_83(name, name83);
+    to_83(base, name83);
+    uint16_t first; uint32_t lba, off;
+    if (find_in(dir, name83, FIND_FILES, &first, NULL, &lba, &off) < 0) return -1;
 
-    uint32_t eps        = g_bps / 32u;
-    uint32_t free_lba   = 0;
-    uint32_t free_off   = 0;
-    int      found_free = 0;
+    fat_free_chain(first);
 
-    /* First pass: look for existing entry (truncate) OR a free slot. */
-    for (uint32_t s = 0; s < g_root_secs; s++) {
-        uint32_t lba = g_root_lba + s;
-        if (rsec(lba) < 0) return -1;
+    if (rsec(lba) < 0) return -1;
+    sec[off] = 0xE5u;
+    return wsec_cur();
+}
 
-        for (uint32_t i = 0; i < eps; i++) {
-            dirent_t *d = (dirent_t *)(sec + i * 32u);
-            uint8_t first = (uint8_t)d->name[0];
+int fat16_mkdir(const char *path, uint16_t cwd_cluster) {
+    if (!fs_ok) return -1;
+    uint16_t parent; const char *base;
+    if (resolve_fat_path(path, cwd_cluster, &parent, &base) < 0) return -1;
+    if (!base || !base[0]) return -1;
 
-            if (first == 0x00 || first == 0xE5) {
-                if (!found_free) {
-                    free_lba   = lba;
-                    free_off   = i * 32u;
-                    found_free = 1;
-                }
-                if (first == 0x00) goto done_scan;  /* no more entries */
-                continue;
-            }
-            if (d->attr & (ATTR_VOLUME | ATTR_SUBDIR)) continue;
+    char name83[11];
+    to_83(base, name83);
+    /* Refuse if it already exists. */
+    if (find_in(parent, name83, FIND_DIRS, NULL, NULL, NULL, NULL) == 0)
+        return -1;
 
-            if (cmp83(d->name, name83, 8) && cmp83(d->ext, name83 + 8, 3)) {
-                /* Existing entry — truncate it. */
-                fat_free_chain(d->first_cluster);
-                d->first_cluster = 0;
-                d->size          = 0;
-                if (wsec(lba) < 0) return -1;
-                *first_cluster = 0;
-                *dir_lba = lba;
-                *dir_off = i * 32u;
-                return 0;
-            }
-        }
+    uint16_t new_cl = fat_alloc();
+    if (!new_cl) return -1;
+
+    /* Write "." and ".." into the new cluster. */
+    uint32_t new_lba = cluster_to_lba(new_cl);
+    if (rsec(new_lba) < 0) { fat_set(new_cl, FAT_FREE); return -1; }
+
+    dirent_t *dot = (dirent_t *)(sec);
+    dot->name[0] = '.';
+    for (int i = 1; i < 8; i++) dot->name[i] = ' ';
+    for (int i = 0; i < 3; i++) dot->ext[i]  = ' ';
+    dot->attr = ATTR_SUBDIR;
+    for (int i = 0; i < 10; i++) dot->reserved[i] = 0;
+    dot->wr_time = dot->wr_date = 0;
+    dot->first_cluster = new_cl;
+    dot->size = 0;
+
+    dirent_t *dotdot = (dirent_t *)(sec + 32u);
+    dotdot->name[0] = '.'; dotdot->name[1] = '.';
+    for (int i = 2; i < 8; i++) dotdot->name[i] = ' ';
+    for (int i = 0; i < 3; i++) dotdot->ext[i]  = ' ';
+    dotdot->attr = ATTR_SUBDIR;
+    for (int i = 0; i < 10; i++) dotdot->reserved[i] = 0;
+    dotdot->wr_time = dotdot->wr_date = 0;
+    dotdot->first_cluster = parent;   /* 0 when parent is root */
+    dotdot->size = 0;
+
+    if (wsec_cur() < 0) { fat_set(new_cl, FAT_FREE); return -1; }
+
+    /* Add the subdir entry to the parent. */
+    uint32_t dent_lba, dent_off;
+    if (alloc_dirent(parent, &dent_lba, &dent_off) < 0) {
+        fat_set(new_cl, FAT_FREE); return -1;
     }
-done_scan:
-    if (!found_free) return -1;  /* root directory is full */
-
-    /* Write a new directory entry in the free slot. */
-    if (rsec(free_lba) < 0) return -1;
-    dirent_t *d = (dirent_t *)(sec + free_off);
-    for (int i = 0; i < 8;  i++) d->name[i] = name83[i];
-    for (int i = 0; i < 3;  i++) d->ext[i]  = name83[8 + i];
-    d->attr          = 0x20u;  /* archive */
+    if (rsec(dent_lba) < 0) return -1;
+    dirent_t *d = (dirent_t *)(sec + dent_off);
+    for (int i = 0; i < 8; i++) d->name[i] = name83[i];
+    for (int i = 0; i < 3; i++) d->ext[i]  = name83[8 + i];
+    d->attr          = ATTR_SUBDIR;
     for (int i = 0; i < 10; i++) d->reserved[i] = 0;
-    d->wr_time       = 0;
-    d->wr_date       = 0;
-    d->first_cluster = 0;
+    d->wr_time = d->wr_date = 0;
+    d->first_cluster = new_cl;
     d->size          = 0;
-    if (wsec(free_lba) < 0) return -1;
+    return wsec_cur();
+}
 
-    *first_cluster = 0;
-    *dir_lba       = free_lba;
-    *dir_off       = free_off;
-    kprintf("fat16: create ok lba=%u off=%u\n", free_lba, free_off);
+int fat16_chdir(const char *path, uint16_t cwd_cluster, uint16_t *new_cluster_out) {
+    if (!fs_ok) return -1;
+
+    /* Special case: cd / */
+    if (path[0] == '/' && path[1] == '\0') { *new_cluster_out = 0; return 0; }
+
+    uint16_t dir; const char *base;
+    if (resolve_fat_path(path, cwd_cluster, &dir, &base) < 0) return -1;
+
+    /* Path ended with '/' or resolved to just a directory. */
+    if (!base || base[0] == '\0') { *new_cluster_out = dir; return 0; }
+
+    /* "." */
+    if (base[0] == '.' && base[1] == '\0') { *new_cluster_out = dir; return 0; }
+
+    /* ".." — read the ".." entry from the current dir. */
+    if (base[0] == '.' && base[1] == '.' && base[2] == '\0') {
+        if (dir == 0) { *new_cluster_out = 0; return 0; }
+        if (dir_rsec(dir, 0) >= 0) {
+            dirent_t *dd = (dirent_t *)(sec + 32u);
+            *new_cluster_out = dd->first_cluster;
+            return 0;
+        }
+        return -1;
+    }
+
+    uint16_t next;
+    if (find_subdir(dir, base, &next) < 0) return -1;
+    *new_cluster_out = next;
     return 0;
 }
 
-uint32_t fat16_read(uint16_t first_cluster, uint32_t pos,
-                    void *buf, uint32_t len) {
+uint32_t fat16_read(uint16_t first_cluster, uint32_t pos, void *buf, uint32_t len) {
     if (!fs_ok || !len || first_cluster < 2u) return 0;
 
     uint32_t cluster_bytes = g_spc * g_bps;
-    uint8_t *dst    = (uint8_t *)buf;
-    uint32_t done   = 0;
+    uint8_t *dst  = (uint8_t *)buf;
+    uint32_t done = 0;
 
     while (done < len) {
         uint16_t cluster = chain_walk(&first_cluster, pos + done, 0);
         if (!cluster) break;
 
-        uint32_t cluster_off = (pos + done) % cluster_bytes;
-        uint32_t remain_in_cluster = cluster_bytes - cluster_off;
-        uint32_t to_read = len - done;
-        if (to_read > remain_in_cluster) to_read = remain_in_cluster;
+        uint32_t cluster_off      = (pos + done) % cluster_bytes;
+        uint32_t remain_in_cl     = cluster_bytes - cluster_off;
+        uint32_t to_read          = len - done;
+        if (to_read > remain_in_cl) to_read = remain_in_cl;
 
-        /* Read sector by sector within the cluster. */
-        uint32_t lba_base = cluster_to_lba(cluster);
-        uint32_t read_in_cluster = 0;
-
+        uint32_t lba_base         = cluster_to_lba(cluster);
+        uint32_t read_in_cluster  = 0;
         while (read_in_cluster < to_read) {
             uint32_t sec_idx = (cluster_off + read_in_cluster) / g_bps;
             uint32_t sec_off = (cluster_off + read_in_cluster) % g_bps;
             uint32_t avail   = g_bps - sec_off;
             uint32_t chunk   = to_read - read_in_cluster;
             if (chunk > avail) chunk = avail;
-
             if (rsec(lba_base + sec_idx) < 0) return done;
-            for (uint32_t i = 0; i < chunk; i++)
-                dst[done + read_in_cluster + i] = sec[sec_off + i];
-
+            for (uint32_t k = 0; k < chunk; k++)
+                dst[done + read_in_cluster + k] = sec[sec_off + k];
             read_in_cluster += chunk;
         }
         done += to_read;
@@ -404,19 +617,16 @@ uint32_t fat16_write(uint16_t *first_cluster_ptr,
                      uint32_t dir_lba, uint32_t dir_off,
                      uint32_t pos, const void *buf, uint32_t len,
                      uint32_t *file_size) {
-    kprintf("fat16: write pos=%u len=%u clus=%u\n", pos, len, *first_cluster_ptr);
     if (!fs_ok || !len) return 0;
 
-    uint32_t cluster_bytes = g_spc * g_bps;
+    uint32_t       cluster_bytes = g_spc * g_bps;
     const uint8_t *src  = (const uint8_t *)buf;
-    uint32_t done       = 0;
-    int      cluster_changed = 0;
+    uint32_t       done = 0;
+    int            cluster_changed = 0;
 
     while (done < len) {
         uint16_t cluster = chain_walk(first_cluster_ptr, pos + done, 1);
         if (!cluster) break;
-
-        /* If chain_walk had to update first_cluster, flag for dirent update. */
         cluster_changed = 1;
 
         uint32_t cluster_off = (pos + done) % cluster_bytes;
@@ -424,61 +634,58 @@ uint32_t fat16_write(uint16_t *first_cluster_ptr,
         uint32_t to_write    = len - done;
         if (to_write > remain) to_write = remain;
 
-        uint32_t lba_base   = cluster_to_lba(cluster);
-        uint32_t written_in = 0;
-
+        uint32_t lba_base    = cluster_to_lba(cluster);
+        uint32_t written_in  = 0;
         while (written_in < to_write) {
             uint32_t sec_idx = (cluster_off + written_in) / g_bps;
             uint32_t sec_off = (cluster_off + written_in) % g_bps;
             uint32_t avail   = g_bps - sec_off;
             uint32_t chunk   = to_write - written_in;
             if (chunk > avail) chunk = avail;
-
-            /* Read-modify-write for partial sector writes. */
             if (sec_off != 0 || chunk < g_bps) {
                 if (rsec(lba_base + sec_idx) < 0) return done;
             }
-            for (uint32_t i = 0; i < chunk; i++)
-                sec[sec_off + i] = src[done + written_in + i];
+            for (uint32_t k = 0; k < chunk; k++)
+                sec[sec_off + k] = src[done + written_in + k];
             if (wsec(lba_base + sec_idx) < 0) return done;
-
             written_in += chunk;
         }
         done += to_write;
     }
 
-    /* Update file size and (if needed) first_cluster in the directory entry. */
     uint32_t new_end = pos + done;
     if (new_end > *file_size) *file_size = new_end;
-
-    if (cluster_changed || new_end > pos)  /* always rewrite dirent on any write */
+    if (cluster_changed || new_end > pos)
         update_dirent(dir_lba, dir_off, *first_cluster_ptr, *file_size);
 
-    kprintf("fat16: write done=%u size=%u clus=%u\n", done, *file_size, *first_cluster_ptr);
     return done;
 }
 
-const char *fat16_getent(uint32_t idx, uint32_t *size_out) {
+/*
+ * Return the idx-th non-deleted, non-volume entry in dir_cluster.
+ * Skips "." and ".." entries.
+ * Sets *size_out (may be NULL) and *is_dir_out (may be NULL).
+ */
+const char *fat16_getent(uint32_t idx, uint16_t dir_cluster,
+                          uint32_t *size_out, int *is_dir_out) {
     if (!fs_ok) return 0;
-
     static char name_buf[13];
     uint32_t eps   = g_bps / 32u;
     uint32_t count = 0;
 
-    for (uint32_t s = 0; s < g_root_secs; s++) {
-        if (rsec(g_root_lba + s) < 0) return 0;
-
+    for (uint32_t s = 0; ; s++) {
+        if (dir_rsec(dir_cluster, s) < 0) return 0;
         for (uint32_t i = 0; i < eps; i++) {
-            dirent_t *d = (dirent_t *)(sec + i * 32u);
-            uint8_t first = (uint8_t)d->name[0];
-
+            dirent_t *d    = (dirent_t *)(sec + i * 32u);
+            uint8_t   first = (uint8_t)d->name[0];
             if (first == 0x00) return 0;
             if (first == 0xE5) continue;
-            if (d->attr & (ATTR_VOLUME | ATTR_SUBDIR)) continue;
-
+            if (d->attr & ATTR_VOLUME) continue;
+            if (first == '.') continue;        /* skip "." and ".." */
             if (count == idx) {
                 from_83(d->name, d->ext, name_buf);
-                if (size_out) *size_out = d->size;
+                if (size_out)   *size_out   = d->size;
+                if (is_dir_out) *is_dir_out = (d->attr & ATTR_SUBDIR) ? 1 : 0;
                 return name_buf;
             }
             count++;

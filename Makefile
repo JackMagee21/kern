@@ -17,13 +17,15 @@ INITRD      := initrd.img
 ULAND_LD    := userland/user.ld
 UCFLAGS     := -ffreestanding -nostdlib -O2 -std=gnu99 -m32 -Wno-builtin-declaration-mismatch
 
-ULAND_ELFS  := userland/sh.elf   \
-               userland/echo.elf \
-               userland/cat.elf  \
-               userland/ls.elf   \
-               userland/wc.elf   \
-               userland/grep.elf \
-               userland/test.elf
+ULAND_ELFS  := userland/sh.elf    \
+               userland/echo.elf  \
+               userland/cat.elf   \
+               userland/ls.elf    \
+               userland/wc.elf    \
+               userland/grep.elf  \
+               userland/test.elf  \
+               userland/rm.elf    \
+               userland/mkdir.elf
 
 # ── Kernel sources ──────────────────────────────────────────────────────
 C_SRCS  := $(shell find . -name '*.c' \
@@ -60,14 +62,16 @@ userland/%.elf: userland/%.c $(ULAND_LD)
 
 # ── Initrd image ────────────────────────────────────────────────────────
 $(INITRD): $(ULAND_ELFS) tools/mkinitrd.py
-	python3 tools/mkinitrd.py $@   \
-	    userland/sh.elf:sh         \
-	    userland/echo.elf:echo     \
-	    userland/cat.elf:cat       \
-	    userland/ls.elf:ls         \
-	    userland/wc.elf:wc         \
-	    userland/grep.elf:grep     \
-	    userland/test.elf:test
+	python3 tools/mkinitrd.py $@    \
+	    userland/sh.elf:sh          \
+	    userland/echo.elf:echo      \
+	    userland/cat.elf:cat        \
+	    userland/ls.elf:ls          \
+	    userland/wc.elf:wc          \
+	    userland/grep.elf:grep      \
+	    userland/test.elf:test      \
+	    userland/rm.elf:rm          \
+	    userland/mkdir.elf:mkdir
 
 # ── ISO image ───────────────────────────────────────────────────────────
 $(ISO): $(KERNEL) $(INITRD) grub.cfg
@@ -98,7 +102,7 @@ run-debug: $(ISO) $(DISK_IMG)
 # ── Clean ───────────────────────────────────────────────────────────────
 clean:
 	rm -rf $(BUILD) $(KERNEL) $(ISO) $(ISO_DIR)/ qemu-debug.log \
-	       $(INITRD) $(ULAND_ELFS)
+	       $(INITRD) userland/*.elf
 
 clean-disk:
 	rm -f $(DISK_IMG)

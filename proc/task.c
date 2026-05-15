@@ -209,11 +209,16 @@ int32_t task_waitpid(uint32_t pid) {
     } while (t != head);
     if (t->pid != pid) return -1;
 
-    /* Yield until it dies. */
-    while (t->state != TASK_DEAD)
+    /* Yield until it dies or stops. */
+    while (t->state != TASK_DEAD && t->state != TASK_STOPPED)
         task_yield();
 
-    /* Remove from circular list. */
+    if (t->state == TASK_STOPPED)
+        return WAIT_STOPPED;   /* caller can send SIGCONT and call again */
+
+    /* TASK_DEAD — harvest exit code and free. */
+    int32_t code = t->exit_code;
+
     task_t *prev = t;
     while (prev->next != t) prev = prev->next;
     if (prev == t) {
@@ -224,7 +229,7 @@ int32_t task_waitpid(uint32_t pid) {
     }
 
     kfree(t);
-    return (int32_t)pid;
+    return code;
 }
 
 /* ── Fork trampoline ──────────────────────────────────────────────────── */
@@ -286,6 +291,12 @@ task_t *task_get_fg(void)    { return fg_task; }
 
 void task_signal(task_t *t, int sig) {
     if (!t || sig < 1 || sig >= NSIG) return;
+    /* SIGCONT: resume immediately regardless of disposition. */
+    if (sig == SIGCONT) {
+        if (t->state == TASK_STOPPED)
+            t->state = TASK_READY;
+        return;
+    }
     if (t->sig_action[sig] == SIG_IGN) return;
     t->pending_sigs |= (1u << sig);
     /* Wake a sleeping task so it sees the signal promptly. */
@@ -302,6 +313,15 @@ void signals_deliver(void) {
     task_t *t = current;
     if (!t || !t->pending_sigs || !t->user_entry) return;
     uint32_t p = t->pending_sigs;
+
+    /* SIGTSTP / SIGSTOP: stop the task and yield; resume when SIGCONT arrives. */
+    if (p & ((1u << SIGTSTP) | (1u << SIGSTOP))) {
+        t->pending_sigs &= ~((1u << SIGTSTP) | (1u << SIGSTOP));
+        t->state = TASK_STOPPED;
+        task_yield();   /* returns here after SIGCONT sets state=TASK_READY */
+        return;
+    }
+
     t->pending_sigs = 0;
     if (p & ((1u << SIGINT) | (1u << SIGKILL) | (1u << SIGPIPE)))
         task_exit();

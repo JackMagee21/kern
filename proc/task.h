@@ -16,6 +16,7 @@ typedef enum {
     TASK_READY    = 1,
     TASK_SLEEPING = 2,
     TASK_DEAD     = 3,
+    TASK_STOPPED  = 4,   /* paused by SIGTSTP / SIGSTOP; resumed by SIGCONT */
 } task_state_t;
 
 typedef struct task {
@@ -29,6 +30,8 @@ typedef struct task {
     uint32_t        user_entry;     /* ELF entry point (user virtual)       */
     uint32_t        user_stack_top; /* initial user ESP (after argv setup)  */
     uint32_t        brk;            /* program break (end of user heap)     */
+    /* Exit code stored by SYS_EXIT; returned by task_waitpid. */
+    int             exit_code;
     /* Signal state. */
     uint32_t        pending_sigs;
     uint32_t        sig_action[NSIG];   /* SIG_DFL or SIG_IGN per signal */

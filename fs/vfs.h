@@ -26,6 +26,12 @@ typedef struct vfs_file {
     };
 } vfs_file_t;
 
+/* Simple stat structure returned by vfs_stat / SYS_STAT. */
+typedef struct {
+    uint32_t size;
+    uint32_t type;   /* 0 = file, 1 = directory */
+} vfs_stat_t;
+
 /* Initialise the VFS from a GRUB-loaded initrd blob. */
 void vfs_init(const void *initrd, uint32_t size);
 
@@ -44,13 +50,32 @@ uint32_t vfs_read(vfs_file_t *f, void *buf, uint32_t len);
 /* Write len bytes at the current position.  Returns bytes written. */
 uint32_t vfs_write(vfs_file_t *f, const void *buf, uint32_t len);
 
+/* Seek within an open file.  whence: 0=SET 1=CUR 2=END.  Returns new pos. */
+int32_t vfs_lseek(vfs_file_t *f, int32_t offset, int whence);
+
 /* Free the vfs_file_t without destroying the underlying file. */
 void vfs_close(vfs_file_t *f);
 
+/* Delete a file.  Returns 0 on success. */
+int vfs_unlink(const char *name);
+
+/* Create a directory.  Returns 0 on success. */
+int vfs_mkdir(const char *name);
+
+/* Change the current working directory.  Returns 0 on success. */
+int vfs_chdir(const char *path);
+
+/* Copy the current working directory path into buf (up to size bytes). */
+void vfs_getcwd(char *buf, uint32_t size);
+
+/* Stat a file or directory by name.  Returns 0 on success. */
+int vfs_stat(const char *name, vfs_stat_t *st);
+
+/* Return the filename of the idx-th entry in the current directory.
+ * (initrd entries are always included; FAT/tmpfs use the cwd.) */
+const char *vfs_getent(uint32_t idx);
+
 typedef void (*vfs_list_cb_t)(const char *name, uint32_t size, void *ud);
 void vfs_list(vfs_list_cb_t cb, void *ud);
-
-/* Return the filename of the idx-th entry (initrd, then FAT16, then tmpfs). */
-const char *vfs_getent(uint32_t idx);
 
 #endif /* VFS_H */

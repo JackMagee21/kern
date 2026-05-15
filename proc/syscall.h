@@ -20,6 +20,12 @@
 #define SYS_SIGNAL  15  /* signal(sig, disposition) → old; SIG_DFL=0, SIG_IGN=1 */
 #define SYS_SETFG   16  /* setfg(pid) — foreground pid for Ctrl+C (0=clear)*/
 #define SYS_OPEN2   17  /* open2(path, flags) — open with O_CREAT support  */
+#define SYS_UNLINK  18  /* unlink(path) — delete a file                    */
+#define SYS_LSEEK   19  /* lseek(fd, offset, whence) → new pos             */
+#define SYS_STAT    20  /* stat(path, stat_buf*)                            */
+#define SYS_MKDIR   21  /* mkdir(path)                                      */
+#define SYS_CHDIR   22  /* chdir(path)                                      */
+#define SYS_GETCWD  23  /* getcwd(buf, size)                                */
 
 /* open2 flags */
 #define O_RDONLY   0

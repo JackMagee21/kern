@@ -27,8 +27,9 @@ static uint32_t alloc_fd(task_t *t, uint32_t first_free) {
 static void syscall_handler(registers_t *regs) {
     switch (regs->eax) {
 
-    /* SYS_EXIT (0) */
+    /* SYS_EXIT (0): exit(code) */
     case SYS_EXIT:
+        task_current()->exit_code = (int)regs->ebx;
         task_exit();
 
     /* SYS_WRITE (1): write(fd, buf, len) */
@@ -378,6 +379,59 @@ static void syscall_handler(registers_t *regs) {
         } while (t != head);
         regs->eax = (uint32_t)-1;
     setfg_done: break;
+    }
+
+    /* SYS_UNLINK (18): unlink(path) */
+    case SYS_UNLINK: {
+        const char *path = (const char *)(uintptr_t)regs->ebx;
+        regs->eax = (uint32_t)vfs_unlink(path);
+        break;
+    }
+
+    /* SYS_LSEEK (19): lseek(fd, offset, whence) → new pos */
+    case SYS_LSEEK: {
+        uint32_t fd     = regs->ebx;
+        int32_t  offset = (int32_t)regs->ecx;
+        int      whence = (int)regs->edx;
+        if (fd >= TASK_MAX_FDS) { regs->eax = (uint32_t)-1; break; }
+        task_t *t = task_current();
+        fd_t   *f = &t->fds[fd];
+        if (f->type != FD_FILE && f->type != FD_FILE_W) {
+            regs->eax = (uint32_t)-1; break;
+        }
+        regs->eax = (uint32_t)vfs_lseek(f->file, offset, whence);
+        break;
+    }
+
+    /* SYS_STAT (20): stat(path, stat_buf*) */
+    case SYS_STAT: {
+        const char  *path = (const char *)(uintptr_t)regs->ebx;
+        vfs_stat_t  *st   = (vfs_stat_t *)(uintptr_t)regs->ecx;
+        regs->eax = (uint32_t)vfs_stat(path, st);
+        break;
+    }
+
+    /* SYS_MKDIR (21): mkdir(path) */
+    case SYS_MKDIR: {
+        const char *path = (const char *)(uintptr_t)regs->ebx;
+        regs->eax = (uint32_t)vfs_mkdir(path);
+        break;
+    }
+
+    /* SYS_CHDIR (22): chdir(path) */
+    case SYS_CHDIR: {
+        const char *path = (const char *)(uintptr_t)regs->ebx;
+        regs->eax = (uint32_t)vfs_chdir(path);
+        break;
+    }
+
+    /* SYS_GETCWD (23): getcwd(buf, size) */
+    case SYS_GETCWD: {
+        char    *buf  = (char *)(uintptr_t)regs->ebx;
+        uint32_t size = regs->ecx;
+        vfs_getcwd(buf, size);
+        regs->eax = 0;
+        break;
     }
 
     /* SYS_OPEN2 (17): open2(path, flags)

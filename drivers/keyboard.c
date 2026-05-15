@@ -100,6 +100,14 @@ static void keyboard_handler(registers_t *regs) {
         return;
     }
 
+    /* Ctrl+Z → deliver SIGTSTP to the foreground task */
+    if (ctrl_held && sc == 0x2C) { /* scan 0x2C = 'z' */
+        task_t *fg = task_get_fg();
+        if (!fg) fg = task_current();
+        task_signal(fg, SIGTSTP);
+        return;
+    }
+
     char c = shift_held ? sc_shift[sc] : sc_ascii[sc];
     if (!c) return;
     kb_put(c);

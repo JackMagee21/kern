@@ -33,11 +33,20 @@ typedef unsigned int   size_t;
 #define SYS_SIGNAL  15
 #define SYS_SETFG   16
 #define SYS_OPEN2   17
+#define SYS_UNLINK  18
+#define SYS_LSEEK   19
+#define SYS_STAT    20
+#define SYS_MKDIR   21
+#define SYS_CHDIR   22
+#define SYS_GETCWD  23
 
 /* Signal numbers */
 #define SIGINT   2
 #define SIGKILL  9
 #define SIGPIPE 13
+#define SIGCONT 18
+#define SIGSTOP 19
+#define SIGTSTP 20
 
 /* Signal dispositions */
 #define SIG_DFL 0u
@@ -49,10 +58,24 @@ typedef unsigned int   size_t;
 #define O_CREAT   0x40
 #define O_APPEND  0x400
 
+/* lseek whence values */
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
+/* Returned by sys_waitpid when child was stopped (not exited). */
+#define WAIT_STOPPED 0x100
+
+/* Stat structure (must match kernel vfs_stat_t). */
+typedef struct { uint32_t size; uint32_t type; } stat_t;
+
 /* ── Raw syscall wrappers ───────────────────────────────────────────────── */
 
 static inline void sys_exit(void) {
-    __asm__ volatile ("int $0x80" :: "a"(SYS_EXIT));
+    __asm__ volatile ("int $0x80" :: "a"(SYS_EXIT), "b"(0));
+}
+static inline void sys_exit_code(int code) {
+    __asm__ volatile ("int $0x80" :: "a"(SYS_EXIT), "b"(code));
 }
 
 static inline int sys_write(int fd, const void *buf, unsigned len) {
@@ -106,9 +129,6 @@ static inline int sys_waitpid(unsigned pid) {
     return ret;
 }
 
-/* exec(path, cmdline): replace current image.
- * cmdline is the full space-separated argument string (e.g. "echo hi").
- * Pass NULL for cmdline to use path as argv[0] only. */
 static inline int sys_exec(const char *path, const char *cmdline) {
     int ret;
     __asm__ volatile ("int $0x80"
@@ -130,7 +150,6 @@ static inline int sys_dup2(int old_fd, int new_fd) {
     return ret;
 }
 
-/* Returns length of name written, 0 if idx is out of range. */
 static inline int sys_getdent(unsigned idx, char *buf, unsigned bufsz) {
     int ret;
     __asm__ volatile ("int $0x80"
@@ -145,7 +164,6 @@ static inline int sys_kill(unsigned pid, int sig) {
     return ret;
 }
 
-/* signal(sig, SIG_DFL/SIG_IGN) — returns old disposition */
 static inline unsigned sys_signal(int sig, unsigned disp) {
     unsigned ret;
     __asm__ volatile ("int $0x80"
@@ -153,7 +171,6 @@ static inline unsigned sys_signal(int sig, unsigned disp) {
     return ret;
 }
 
-/* setfg(pid) — register pid as foreground for Ctrl+C (0 = clear) */
 static inline int sys_setfg(unsigned pid) {
     int ret;
     __asm__ volatile ("int $0x80"
@@ -161,7 +178,6 @@ static inline int sys_setfg(unsigned pid) {
     return ret;
 }
 
-/* open2(path, flags) — supports O_RDONLY, O_WRONLY|O_CREAT, O_APPEND */
 static inline int sys_open2(const char *path, int flags) {
     int ret;
     __asm__ volatile ("int $0x80"
@@ -171,6 +187,46 @@ static inline int sys_open2(const char *path, int flags) {
 
 static inline void sys_sleep(unsigned ms) {
     __asm__ volatile ("int $0x80" :: "a"(SYS_SLEEP), "b"(ms) : "memory");
+}
+
+static inline int sys_unlink(const char *path) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_UNLINK), "b"(path) : "memory");
+    return ret;
+}
+
+static inline int sys_lseek(int fd, int offset, int whence) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_LSEEK), "b"(fd), "c"(offset), "d"(whence) : "memory");
+    return ret;
+}
+
+static inline int sys_stat(const char *path, stat_t *buf) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_STAT), "b"(path), "c"(buf) : "memory");
+    return ret;
+}
+
+static inline int sys_mkdir(const char *path) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_MKDIR), "b"(path) : "memory");
+    return ret;
+}
+
+static inline int sys_chdir(const char *path) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+        : "=a"(ret) : "0"(SYS_CHDIR), "b"(path) : "memory");
+    return ret;
+}
+
+static inline void sys_getcwd(char *buf, unsigned size) {
+    __asm__ volatile ("int $0x80"
+        :: "a"(SYS_GETCWD), "b"(buf), "c"(size) : "memory");
 }
 
 /* ── Strings ────────────────────────────────────────────────────────────── */
@@ -223,7 +279,6 @@ static inline void puts(const char *s) {
     putchar('\n');
 }
 
-/* Read one line into buf (up to len-1 chars), null-terminate. Returns length. */
 static inline int getline(char *buf, int len) {
     int n = sys_read(0, buf, (unsigned)(len - 1));
     if (n > 0 && buf[n-1] == '\n') n--;
@@ -231,42 +286,119 @@ static inline int getline(char *buf, int len) {
     return n;
 }
 
-/* ── printf ─────────────────────────────────────────────────────────────── */
+/* ── printf / snprintf / fprintf ────────────────────────────────────────── */
 
-static inline void _put_uint(unsigned n, unsigned base) {
+/* Write unsigned n (in given base) into buf with optional width/padding.
+ * Returns number of characters written (not including NUL). */
+static inline int _itoa_u(unsigned n, unsigned base, char *buf,
+                           int width, int zero_pad, int left_align) {
     static const char hex[] = "0123456789abcdef";
-    char buf[32]; int i = 0;
-    if (!n) { putchar('0'); return; }
-    while (n) { buf[i++] = hex[n % base]; n /= base; }
-    while (i--) putchar(buf[i]);
+    char tmp[32]; int dlen = 0;
+    if (!n) { tmp[dlen++] = '0'; }
+    else while (n) { tmp[dlen++] = hex[n % base]; n /= base; }
+    int pad  = (width > dlen) ? width - dlen : 0;
+    int pos  = 0;
+    char pc  = (zero_pad && !left_align) ? '0' : ' ';
+    if (!left_align) while (pad--) buf[pos++] = pc;
+    for (int i = dlen - 1; i >= 0; i--) buf[pos++] = tmp[i];
+    if  (left_align) while (pad--) buf[pos++] = ' ';
+    buf[pos] = '\0';
+    return pos;
 }
 
-/* Minimal printf: supports %c %s %d %u %x %%. No width/precision. */
-static inline void printf(const char *fmt, ...) {
-    /* Manual va_list using pointer arithmetic (works with -ffreestanding). */
-    const char **ap = (const char **)__builtin_apply_args();
-    (void)ap; /* suppress warning — we use __builtin_va_list below */
+/*
+ * Core formatted-print routine.  Writes at most max-1 chars into dst and
+ * NUL-terminates.  Returns number of chars written (excluding NUL).
+ *
+ * Supported conversions: %c %s %d %u %x %p %%
+ * Flags / width: -, 0, and an integer width before the conversion letter.
+ */
+static inline uint32_t _vsnprintf(char *dst, uint32_t max,
+                                   const char *fmt, __builtin_va_list ap) {
+    uint32_t pos = 0;
+#define _P(c) do { if (pos + 1 < max) dst[pos++] = (char)(c); } while(0)
+    while (*fmt) {
+        if (*fmt != '%') { _P(*fmt++); continue; }
+        fmt++;  /* skip '%' */
 
-    __builtin_va_list args;
-    __builtin_va_start(args, fmt);
+        int left = 0, zero = 0, width = 0;
+        while (*fmt == '-') { left = 1; fmt++; }
+        while (*fmt == '0') { zero = 1; fmt++; }
+        while (*fmt >= '1' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
 
-    for (; *fmt; fmt++) {
-        if (*fmt != '%') { putchar(*fmt); continue; }
-        switch (*++fmt) {
-            case 'c': putchar((char)__builtin_va_arg(args, int)); break;
-            case 's': { const char *s = __builtin_va_arg(args, const char *);
-                        if (!s) s = "(null)";
-                        sys_write(1, s, strlen(s)); break; }
-            case 'd': { int n = __builtin_va_arg(args, int);
-                        if (n < 0) { putchar('-'); _put_uint((unsigned)-n, 10); }
-                        else _put_uint((unsigned)n, 10); break; }
-            case 'u': _put_uint(__builtin_va_arg(args, unsigned), 10); break;
-            case 'x': _put_uint(__builtin_va_arg(args, unsigned), 16); break;
-            case '%': putchar('%'); break;
-            default:  putchar('%'); putchar(*fmt); break;
+        char tbuf[48]; int tlen = 0;
+        switch (*fmt++) {
+        case 'c':
+            tbuf[0] = (char)__builtin_va_arg(ap, int); tlen = 1; break;
+        case 's': {
+            const char *s = __builtin_va_arg(ap, const char *);
+            if (!s) s = "(null)";
+            int slen = (int)strlen(s);
+            int pad  = (width > slen) ? width - slen : 0;
+            if (!left) while (pad--) _P(' ');
+            while (*s) _P(*s++);
+            if  (left) while (pad--) _P(' ');
+            continue;
         }
+        case 'd': {
+            int n   = __builtin_va_arg(ap, int);
+            int neg = (n < 0);
+            unsigned u = neg ? (unsigned)(-n) : (unsigned)n;
+            char nb[32]; int nl = 0;
+            if (!u) nb[nl++] = '0';
+            else while (u) { nb[nl++] = '0' + (int)(u % 10); u /= 10; }
+            int total = nl + (neg ? 1 : 0);
+            int pad   = (width > total) ? width - total : 0;
+            if (!left && !zero) while (pad--) _P(' ');
+            if (neg) _P('-');
+            if (!left && zero) while (pad--) _P('0');
+            for (int i = nl - 1; i >= 0; i--) _P(nb[i]);
+            if (left) while (pad--) _P(' ');
+            continue;
+        }
+        case 'u':
+            tlen = _itoa_u(__builtin_va_arg(ap,unsigned), 10, tbuf, width, zero&&!left, left);
+            break;
+        case 'x':
+            tlen = _itoa_u(__builtin_va_arg(ap,unsigned), 16, tbuf, width, zero&&!left, left);
+            break;
+        case 'p':
+            tlen = _itoa_u((unsigned)__builtin_va_arg(ap,void*), 16, tbuf, 8, 1, 0);
+            break;
+        case '%': _P('%'); continue;
+        default:  _P('%'); _P(*(fmt-1)); continue;
+        }
+        for (int i = 0; i < tlen; i++) _P(tbuf[i]);
     }
-    __builtin_va_end(args);
+    if (max > 0) dst[pos] = '\0';
+#undef _P
+    return pos;
+}
+
+static inline int snprintf(char *buf, uint32_t sz, const char *fmt, ...) {
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    int n = (int)_vsnprintf(buf, sz, fmt, ap);
+    __builtin_va_end(ap);
+    return n;
+}
+
+static inline void printf(const char *fmt, ...) {
+    char buf[512];
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    int n = (int)_vsnprintf(buf, sizeof(buf), fmt, ap);
+    __builtin_va_end(ap);
+    sys_write(1, buf, (unsigned)n);
+}
+
+static inline void fprintf(int fd, const char *fmt, ...) {
+    char buf[512];
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    int n = (int)_vsnprintf(buf, sizeof(buf), fmt, ap);
+    __builtin_va_end(ap);
+    sys_write(fd, buf, (unsigned)n);
 }
 
 /* ── malloc / free (sbrk-based bump+freelist allocator) ─────────────────── */
@@ -275,7 +407,7 @@ static inline void printf(const char *fmt, ...) {
 
 typedef struct _blk {
     unsigned        magic;
-    unsigned        size;   /* usable bytes */
+    unsigned        size;
     unsigned        free;
     struct _blk    *next;
 } _blk_t;
@@ -311,7 +443,6 @@ static inline void *malloc(size_t size) {
 
     _heap_end = (char *)old + total;
 
-    /* Append to list. */
     if (!_heap_head) { _heap_head = b; }
     else {
         _blk_t *t = _heap_head;
