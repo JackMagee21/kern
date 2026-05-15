@@ -19,6 +19,8 @@
 #include "syscall.h"
 #include "task.h"
 #include "vfs.h"
+#include "ata.h"
+#include "fat16.h"
 
 extern uint32_t _kernel_end;   /* VMA of first byte after the kernel image */
 
@@ -105,6 +107,17 @@ void kernel_main(uint32_t magic, uint32_t mbi_phys) {
         pmm_reserve(mod_phys, mod_size);
         kprintf("[OK] Initrd loaded — %u bytes at phys 0x%x\n",
                 mod_size, mod_phys);
+    }
+
+    /* ATA primary master + FAT16 (disk.img passed as -drive to QEMU). */
+    if (ata_init() == 0) {
+        terminal_print("[OK] ATA drive detected\n");
+        if (fat16_init() == 0)
+            terminal_print("[OK] FAT16 filesystem mounted\n");
+        else
+            terminal_print("[--] FAT16 not found on drive\n");
+    } else {
+        terminal_print("[--] No ATA drive — using tmpfs only\n");
     }
 
     scheduler_init();

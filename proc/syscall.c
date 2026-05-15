@@ -43,8 +43,8 @@ static void syscall_handler(registers_t *regs) {
         fd_t   *f = &t->fds[fd];
 
         if (f->type == FD_NONE) {
-            /* fd 1 = VGA stdout default; all others are errors. */
-            if (fd == 1) {
+            /* fd 1 and 2 default to VGA; all others are errors. */
+            if (fd == 1 || fd == 2) {
                 for (uint32_t i = 0; i < len; i++) terminal_putchar(buf[i]);
                 regs->eax = len;
             } else {
@@ -220,6 +220,19 @@ static void syscall_handler(registers_t *regs) {
         const char *path    = (const char *)(uintptr_t)regs->ebx;
         const char *cmdline = regs->ecx ? (const char *)(uintptr_t)regs->ecx
                                         : path;
+
+        /* Copy cmdline to kernel stack before we switch page directories.
+         * After vmm_switch(new_pd), the user-space virtual address is
+         * remapped to a new zeroed frame, so reading it would give zeros. */
+        char cmd_buf[256];
+        {
+            const char *src = cmdline ? cmdline : "";
+            uint32_t i;
+            for (i = 0; i < sizeof(cmd_buf) - 1 && src[i]; i++)
+                cmd_buf[i] = src[i];
+            cmd_buf[i] = '\0';
+        }
+        cmdline = cmd_buf;
 
         vfs_file_t *vf = vfs_open(path);
         if (!vf) { regs->eax = (uint32_t)-1; break; }

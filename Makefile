@@ -7,10 +7,11 @@ CFLAGS  := -ffreestanding -nostdlib -O2 -Wall -Wextra -std=gnu99 -m32 \
            -MMD -MP
 ASFLAGS := -ffreestanding -nostdlib -m32
 
-BUILD   := build
-ISO_DIR := iso
-KERNEL  := kern.bin
-ISO     := kern.iso
+BUILD    := build
+ISO_DIR  := iso
+KERNEL   := kern.bin
+ISO      := kern.iso
+DISK_IMG := disk.img
 
 INITRD      := initrd.img
 ULAND_LD    := userland/user.ld
@@ -76,23 +77,33 @@ $(ISO): $(KERNEL) $(INITRD) grub.cfg
 	cp grub.cfg  $(ISO_DIR)/boot/grub/grub.cfg
 	grub-mkrescue -o $(ISO) $(ISO_DIR)
 
+# ── Disk image (FAT16, 32 MB) — created once; not deleted by 'clean' ────
+$(DISK_IMG):
+	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=32 2>/dev/null
+	mkfs.fat -F 16 $(DISK_IMG) >/dev/null
+
 # ── Run targets ─────────────────────────────────────────────────────────
-run: $(ISO)
-	qemu-system-i386 -cdrom $(ISO) -serial stdio -display gtk
+QEMU_DRIVE := -drive file=$(DISK_IMG),format=raw,if=ide,index=0 -boot order=d
 
-run-headless: $(ISO)
-	qemu-system-i386 -cdrom $(ISO) -display none -serial stdio
+run: $(ISO) $(DISK_IMG)
+	qemu-system-i386 -cdrom $(ISO) -serial stdio -display gtk $(QEMU_DRIVE)
 
-run-debug: $(ISO)
+run-headless: $(ISO) $(DISK_IMG)
+	qemu-system-i386 -cdrom $(ISO) -display none -serial stdio $(QEMU_DRIVE)
+
+run-debug: $(ISO) $(DISK_IMG)
 	qemu-system-i386 -cdrom $(ISO) -display none -serial stdio \
-	    -d int,cpu_reset -no-reboot -no-shutdown 2>qemu-debug.log
+	    -d int,cpu_reset -no-reboot -no-shutdown $(QEMU_DRIVE) 2>qemu-debug.log
 
 # ── Clean ───────────────────────────────────────────────────────────────
 clean:
 	rm -rf $(BUILD) $(KERNEL) $(ISO) $(ISO_DIR)/ qemu-debug.log \
 	       $(INITRD) $(ULAND_ELFS)
 
+clean-disk:
+	rm -f $(DISK_IMG)
+
 # ── Auto-generated header dependencies ─────────────────────────────────────
 -include $(C_OBJS:.o=.d)
 
-.PHONY: all run run-headless run-debug clean
+.PHONY: all run run-headless run-debug clean clean-disk

@@ -28,7 +28,7 @@
 /*
  * Set up 4 KB paging.
  *
- * Pre-maps 32 MB starting at KERNEL_VMA (8 page tables × 4 MB).
+ * Pre-maps 1 GB starting at KERNEL_VMA (256 page tables × 4 MB).
  * Replaces the 4 MB PSE boot mapping installed by boot.s and reloads CR3.
  * Page 0 (physical 0x000–0xFFF) is left unmapped as a null-pointer guard.
  */

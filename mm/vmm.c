@@ -11,7 +11,7 @@
  * PT_PREALLOC tables × 4 MB per table = 32 MB pre-mapped at KERNEL_VMA.
  * PDE[768 + t] → pt_kernel[t] → maps physical t×4MB .. (t+1)×4MB - 1.
  */
-#define PT_PREALLOC 8   /* covers 32 MB; enough for kernel + heap + page tables */
+#define PT_PREALLOC 256  /* covers 1 GB; handles any practical QEMU RAM size */
 
 static uint32_t page_dir[1024]              __attribute__((aligned(4096)));
 static uint32_t pt_kernel[PT_PREALLOC][1024] __attribute__((aligned(4096)));
