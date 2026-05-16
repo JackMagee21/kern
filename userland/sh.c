@@ -17,8 +17,10 @@
 #define MAX_AO_SEGS     8
 #define HIST_MAX       16
 #define MAX_JOBS        8
-#define PROMPT         "$ "
-#define PROMPT_LEN      2
+
+/* Built fresh before each readline call so line_replace can redraw it. */
+static char g_prompt[132];
+static int  g_prompt_len;
 
 /* ── Command history ────────────────────────────────────────────────────── */
 
@@ -116,7 +118,7 @@ static void tab_complete(char *buf, int *n, int maxlen) {
 
 static void line_replace(const char *buf, int n) {
     sys_write(1, "\r\033[K", 4);
-    sys_write(1, PROMPT, PROMPT_LEN);
+    sys_write(1, g_prompt, (unsigned)g_prompt_len);
     if (n > 0) sys_write(1, buf, (unsigned)n);
 }
 
@@ -369,8 +371,8 @@ static int run_pipeline(char **segs, int nseg, const char *raw_line) {
 static void print_prompt(void) {
     char cwd[128];
     sys_getcwd(cwd, sizeof(cwd));
-    sys_write(1, cwd, strlen(cwd));
-    sys_write(1, PROMPT, PROMPT_LEN);
+    g_prompt_len = snprintf(g_prompt, sizeof(g_prompt), "%s$ ", cwd);
+    sys_write(1, g_prompt, (unsigned)g_prompt_len);
 }
 
 /* ── Entry point ────────────────────────────────────────────────────────── */
